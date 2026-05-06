@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +23,7 @@ import vip.mate.approval.repository.ToolApprovalMapper;
 import vip.mate.tool.guard.model.GuardEvaluation;
 import vip.mate.tool.guard.model.GuardFinding;
 import vip.mate.workspace.conversation.ConversationService;
+import vip.mate.workspace.conversation.event.ConversationDeletedEvent;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -79,6 +81,26 @@ public class ApprovalWorkflowService implements ApplicationRunner {
     void shutdownGc() {
         if (gcScheduler != null) {
             gcScheduler.shutdownNow();
+        }
+    }
+
+    /**
+     * Drop in-memory approval state for a deleted conversation. The cascade in
+     * {@link ConversationService#deleteConversation} already removed the
+     * {@code mate_tool_approval} rows; this listener clears the parallel
+     * {@code pendingMap} entries so {@code findPendingByConversation} cannot
+     * keep returning a ghost approval that points at a non-existent
+     * conversation row.
+     * <p>
+     * Runs after the DB cascade commits — see
+     * {@link ConversationDeletedEvent}.
+     */
+    @EventListener
+    public void onConversationDeleted(ConversationDeletedEvent event) {
+        int removed = approvalService.removeAllByConversation(event.conversationId());
+        if (removed > 0) {
+            log.info("[ApprovalWorkflow] Dropped {} in-memory pending entries for deleted conversation {}",
+                    removed, event.conversationId());
         }
     }
 

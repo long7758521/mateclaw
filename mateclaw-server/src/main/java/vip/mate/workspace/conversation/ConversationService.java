@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -20,6 +21,7 @@ import vip.mate.channel.model.ChannelSessionEntity;
 import vip.mate.channel.repository.ChannelSessionMapper;
 import vip.mate.task.model.AsyncTaskEntity;
 import vip.mate.task.repository.AsyncTaskMapper;
+import vip.mate.workspace.conversation.event.ConversationDeletedEvent;
 import vip.mate.workspace.conversation.model.ConversationEntity;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 import vip.mate.workspace.conversation.model.MessageEntity;
@@ -61,6 +63,7 @@ public class ConversationService {
     private final ToolApprovalMapper toolApprovalMapper;
     private final AsyncTaskMapper asyncTaskMapper;
     private final ChannelSessionMapper channelSessionMapper;
+    private final ApplicationEventPublisher eventPublisher;
 
     /**
      * 获取用户的会话列表（返回 VO，包含 agentName/agentIcon/status）
@@ -481,19 +484,29 @@ public class ConversationService {
                 conversationId, messages, approvals, asyncTasks,
                 channelSessions, childrenUnlinked, conversations);
 
-        registerAttachmentCleanupAfterCommit(conversationId);
+        registerPostCommitCleanup(conversationId);
     }
 
-    private void registerAttachmentCleanupAfterCommit(String conversationId) {
+    /**
+     * After-commit cleanup: file IO and the {@link ConversationDeletedEvent}
+     * fan-out both run only if the cascade actually persists, and an IO
+     * failure cannot roll back the DB cascade. The event lets approval and
+     * async-task modules drop their in-memory state (pendingMap, active
+     * pollers, canceled-conv set) so workers cannot resurrect orphan rows
+     * after the conversation row is gone.
+     */
+    private void registerPostCommitCleanup(String conversationId) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
                     cleanAttachmentFiles(conversationId);
+                    eventPublisher.publishEvent(new ConversationDeletedEvent(conversationId));
                 }
             });
         } else {
             cleanAttachmentFiles(conversationId);
+            eventPublisher.publishEvent(new ConversationDeletedEvent(conversationId));
         }
     }
 
