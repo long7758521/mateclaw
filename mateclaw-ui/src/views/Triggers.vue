@@ -4,52 +4,52 @@
       <div class="mc-page-inner triggers-page">
         <div class="mc-page-header">
           <div>
-            <div class="mc-page-kicker">Triggers</div>
-            <h1 class="mc-page-title">Workflow Triggers</h1>
-            <p class="mc-page-desc">
-              Connect cron schedules and channel events to your published workflows.
-              Pattern_version increments on every cron expression change so multi-node
-              deployments coordinate correctly.
-            </p>
+            <div class="mc-page-kicker">{{ t('triggers.kicker') }}</div>
+            <h1 class="mc-page-title">{{ t('triggers.title') }}</h1>
+            <p class="mc-page-desc">{{ t('triggers.desc') }}</p>
           </div>
-          <button class="btn-primary" @click="openCreate">+ New Trigger</button>
+          <button class="btn-primary" @click="openCreate">{{ t('triggers.newTrigger') }}</button>
         </div>
 
         <table class="triggers-table mc-surface-card">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Pattern</th>
-              <th>Target Workflow</th>
-              <th>Rate</th>
-              <th>Fires</th>
-              <th>State</th>
-              <th>Actions</th>
+              <th>{{ t('triggers.columns.name') }}</th>
+              <th>{{ t('triggers.columns.pattern') }}</th>
+              <th>{{ t('triggers.columns.target') }}</th>
+              <th>{{ t('triggers.columns.rate') }}</th>
+              <th>{{ t('triggers.columns.fires') }}</th>
+              <th>{{ t('triggers.columns.patternVersion') }}</th>
+              <th>{{ t('triggers.columns.lastFired') }}</th>
+              <th>{{ t('triggers.columns.state') }}</th>
+              <th>{{ t('triggers.columns.actions') }}</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="t in triggers" :key="t.id">
-              <td>{{ t.name || '(unnamed)' }}</td>
+            <tr v-for="row in triggers" :key="row.id">
+              <td>{{ row.name || t('triggers.unnamed') }}</td>
               <td>
-                <code>{{ t.patternType }}</code>
-                <div class="pattern-detail">{{ t.patternJson }}</div>
+                <code>{{ row.patternType }}</code>
+                <div class="pattern-detail">{{ row.patternJson }}</div>
               </td>
-              <td>{{ t.targetType }}#{{ t.targetId }}</td>
-              <td>{{ t.rateLimitPerMin }}/min</td>
-              <td>{{ t.fireCount }}<span v-if="t.maxFires > 0"> / {{ t.maxFires }}</span></td>
+              <td>{{ formatTarget(row) }}</td>
+              <td>{{ t('triggers.rateUnit', { count: row.rateLimitPerMin }) }}</td>
+              <td>{{ row.fireCount }}<span v-if="row.maxFires > 0"> / {{ row.maxFires }}</span></td>
+              <td>{{ row.patternVersion }}</td>
+              <td>{{ formatTime(row.lastFiredAt) }}</td>
               <td>
                 <label class="toggle">
-                  <input type="checkbox" :checked="t.enabled" @change="toggleEnabled(t)" />
-                  <span>{{ t.enabled ? 'enabled' : 'disabled' }}</span>
+                  <input type="checkbox" :checked="row.enabled" @change="toggleEnabled(row)" />
+                  <span>{{ row.enabled ? t('triggers.enabled') : t('triggers.disabled') }}</span>
                 </label>
               </td>
               <td class="actions">
-                <button class="btn-ghost" @click="openEdit(t)">Edit</button>
-                <button class="btn-danger" @click="remove(t)">Delete</button>
+                <button class="btn-ghost" @click="openEdit(row)">{{ t('triggers.actions.edit') }}</button>
+                <button class="btn-danger" @click="remove(row)">{{ t('triggers.actions.delete') }}</button>
               </td>
             </tr>
             <tr v-if="!triggers.length">
-              <td colspan="7" class="empty-row">No triggers configured.</td>
+              <td colspan="9" class="empty-row">{{ t('triggers.empty') }}</td>
             </tr>
           </tbody>
         </table>
@@ -57,12 +57,14 @@
         <!-- Inline form (replaces modal for v0 simplicity) -->
         <section v-if="formOpen" class="form-card mc-surface-card">
           <header>
-            <strong>{{ editing?.id ? 'Edit Trigger' : 'New Trigger' }}</strong>
-            <button class="btn-ghost" @click="closeForm">Close</button>
+            <strong>{{ editing?.id ? t('triggers.formTitleEdit') : t('triggers.formTitleNew') }}</strong>
+            <button class="btn-ghost" @click="closeForm">{{ t('triggers.actions.close') }}</button>
           </header>
           <div class="form-grid">
-            <label>Name <input v-model="formState.name" placeholder="hourly-cleanup" /></label>
-            <label>Pattern type
+            <label>{{ t('triggers.fields.name') }}
+              <input v-model="formState.name" :placeholder="t('triggers.fields.namePlaceholder')" />
+            </label>
+            <label>{{ t('triggers.fields.patternType') }}
               <select v-model="formState.patternType">
                 <option value="cron">cron</option>
                 <option value="channel_message">channel_message</option>
@@ -70,38 +72,55 @@
                 <option value="workflow_completion">workflow_completion</option>
               </select>
             </label>
-            <label class="span-2">Pattern JSON
+            <label class="span-2">{{ t('triggers.fields.patternJson') }}
               <textarea v-model="formState.patternJson" rows="3"
-                placeholder='{"cron":"0 0 * * * *","timezone":"UTC"}' />
+                :placeholder="t('triggers.fields.patternJsonPlaceholder')" />
+              <small class="pattern-hint">{{ patternHint }}</small>
             </label>
-            <label>Target type
+            <label>{{ t('triggers.fields.targetType') }}
               <select v-model="formState.targetType">
                 <option value="workflow">workflow</option>
                 <option value="agent">agent</option>
               </select>
             </label>
-            <label>Target id <input v-model.number="formState.targetId" type="number" /></label>
-            <label>Rate / min <input v-model.number="formState.rateLimitPerMin" type="number" /></label>
-            <label>Dedup window (s) <input v-model.number="formState.dedupWindowSecs" type="number" /></label>
-            <label>Max fires (0 = unlimited)
+            <label v-if="formState.targetType === 'workflow'">{{ t('triggers.fields.targetId') }}
+              <select v-model.number="formState.targetId">
+                <option v-if="!availableWorkflows.length" :value="0">
+                  {{ t('triggers.targetWorkflowEmpty') }}
+                </option>
+                <option v-else v-for="wf in availableWorkflows" :key="wf.id" :value="wf.id">
+                  #{{ wf.id }} — {{ wf.name || t('triggers.unnamed') }}
+                </option>
+              </select>
+            </label>
+            <label v-else>{{ t('triggers.fields.targetId') }}
+              <input v-model.number="formState.targetId" type="number" />
+            </label>
+            <label>{{ t('triggers.fields.ratePerMin') }}
+              <input v-model.number="formState.rateLimitPerMin" type="number" />
+            </label>
+            <label>{{ t('triggers.fields.dedupWindowSecs') }}
+              <input v-model.number="formState.dedupWindowSecs" type="number" />
+            </label>
+            <label>{{ t('triggers.fields.maxFires') }}
               <input v-model.number="formState.maxFires" type="number" />
             </label>
             <label>
               <input type="checkbox" v-model="formState.botSelfFilter" />
-              Bot-self filter (recommended)
+              {{ t('triggers.fields.botSelfFilter') }}
             </label>
-            <label class="span-2">Payload template (Pebble)
+            <label class="span-2">{{ t('triggers.fields.payloadTemplate') }}
               <textarea v-model="formState.payloadTemplate" rows="3"
-                placeholder='{"who":"{{ event.who }}"}' />
+                :placeholder="t('triggers.fields.payloadTemplatePlaceholder')" />
             </label>
             <label class="span-2">
               <input type="checkbox" v-model="formState.enabled" />
-              Enabled
+              {{ t('triggers.fields.enabled') }}
             </label>
           </div>
           <footer>
-            <button class="btn-ghost" @click="closeForm">Cancel</button>
-            <button class="btn-primary" :disabled="busy" @click="save">Save</button>
+            <button class="btn-ghost" @click="closeForm">{{ t('triggers.actions.cancel') }}</button>
+            <button class="btn-primary" :disabled="busy" @click="save">{{ t('triggers.actions.save') }}</button>
           </footer>
         </section>
       </div>
@@ -111,12 +130,24 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { triggerApi, type TriggerSummary } from '@/api'
+import { useI18n } from 'vue-i18n'
+import { triggerApi, type TriggerSummary, workflowApi, type WorkflowSummary } from '@/api'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 
+const { t } = useI18n()
 const workspaceStore = useWorkspaceStore()
 const workspaceId = computed(() => workspaceStore.currentWorkspaceId)
 const triggers = ref<TriggerSummary[]>([])
+const workflows = ref<WorkflowSummary[]>([])
+
+const availableWorkflows = computed(() =>
+  workflows.value.filter((w) => w.latestRevisionId)
+)
+
+const patternHint = computed(() => {
+  const key = `triggers.patternHints.${formState.value.patternType}`
+  return t(key, '')
+})
 
 const formOpen = ref(false)
 const editing = ref<TriggerSummary | null>(null)
@@ -162,6 +193,25 @@ async function reload() {
   } catch (e) {
     console.error('listTriggers failed', e)
   }
+  try {
+    const res = await workflowApi.list(workspaceId.value)
+    workflows.value = (res.data as unknown as WorkflowSummary[]) ?? []
+  } catch (e) {
+    console.error('listWorkflows failed', e)
+  }
+}
+
+function formatTarget(row: TriggerSummary) {
+  if (row.targetType === 'workflow') {
+    const wf = workflows.value.find((w) => w.id === row.targetId)
+    if (wf?.name) return `${wf.name} (#${row.targetId})`
+  }
+  return `${row.targetType}#${row.targetId}`
+}
+
+function formatTime(iso?: string) {
+  if (!iso) return '-'
+  return iso.replace('T', ' ').slice(0, 19)
 }
 
 function openCreate() {
@@ -170,20 +220,20 @@ function openCreate() {
   formOpen.value = true
 }
 
-function openEdit(t: TriggerSummary) {
-  editing.value = t
+function openEdit(row: TriggerSummary) {
+  editing.value = row
   formState.value = {
-    name: t.name ?? '',
-    patternType: t.patternType,
-    patternJson: t.patternJson,
-    targetType: t.targetType,
-    targetId: t.targetId,
-    rateLimitPerMin: t.rateLimitPerMin ?? 60,
-    dedupWindowSecs: t.dedupWindowSecs ?? 60,
-    botSelfFilter: t.botSelfFilter ?? true,
-    enabled: t.enabled,
-    maxFires: t.maxFires ?? 0,
-    payloadTemplate: t.payloadTemplate ?? '',
+    name: row.name ?? '',
+    patternType: row.patternType,
+    patternJson: row.patternJson,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    rateLimitPerMin: row.rateLimitPerMin ?? 60,
+    dedupWindowSecs: row.dedupWindowSecs ?? 60,
+    botSelfFilter: row.botSelfFilter ?? true,
+    enabled: row.enabled,
+    maxFires: row.maxFires ?? 0,
+    payloadTemplate: row.payloadTemplate ?? '',
   }
   formOpen.value = true
 }
@@ -208,28 +258,28 @@ async function save() {
     formOpen.value = false
     await reload()
   } catch (e) {
-    window.alert('Save failed: ' + (e as Error).message)
+    window.alert(t('triggers.saveFailed', { msg: (e as Error).message }))
   } finally {
     busy.value = false
   }
 }
 
-async function toggleEnabled(t: TriggerSummary) {
+async function toggleEnabled(row: TriggerSummary) {
   try {
-    await triggerApi.update(t.id, { ...t, enabled: !t.enabled })
+    await triggerApi.update(row.id, { ...row, enabled: !row.enabled })
     await reload()
   } catch (e) {
-    window.alert('Toggle failed: ' + (e as Error).message)
+    window.alert(t('triggers.toggleFailed', { msg: (e as Error).message }))
   }
 }
 
-async function remove(t: TriggerSummary) {
-  if (!window.confirm(`Delete trigger "${t.name || t.id}"?`)) return
+async function remove(row: TriggerSummary) {
+  if (!window.confirm(t('triggers.deleteConfirm', { name: row.name || String(row.id) }))) return
   try {
-    await triggerApi.delete(t.id)
+    await triggerApi.delete(row.id)
     await reload()
   } catch (e) {
-    window.alert('Delete failed: ' + (e as Error).message)
+    window.alert(t('triggers.deleteFailed', { msg: (e as Error).message }))
   }
 }
 
@@ -320,6 +370,15 @@ watch(workspaceId, reload)
 .form-grid textarea {
   font-family: 'JetBrains Mono', Consolas, monospace;
   font-size: 12px;
+}
+.pattern-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  opacity: 0.7;
+  white-space: pre-wrap;
 }
 .form-card footer {
   margin-top: 12px;
