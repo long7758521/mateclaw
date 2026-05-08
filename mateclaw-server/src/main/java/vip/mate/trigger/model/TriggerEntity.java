@@ -56,6 +56,16 @@ public class TriggerEntity {
     @TableField(value = "last_fired_at", updateStrategy = FieldStrategy.ALWAYS)
     private LocalDateTime lastFiredAt;
 
+    /** Most recent dispatch outcome message; null on success, populated on
+     *  SKIPPED / FAILED so the UI can show why a trigger has stopped firing. */
+    @TableField(value = "last_error", updateStrategy = FieldStrategy.ALWAYS)
+    private String lastError;
+
+    /** Stamp of the last dispatch attempt regardless of outcome — used to
+     *  distinguish "never attempted" from "attempted but skipped". */
+    @TableField(value = "last_dispatched_at", updateStrategy = FieldStrategy.ALWAYS)
+    private LocalDateTime lastDispatchedAt;
+
     /** Lamport counter — bump on every cron expression / payload template change. */
     private Long patternVersion;
 

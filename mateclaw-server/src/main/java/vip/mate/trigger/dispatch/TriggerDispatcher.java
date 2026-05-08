@@ -42,33 +42,60 @@ public class TriggerDispatcher {
 
     /**
      * Dispatch a single fire of {@code trigger}. {@code event} is the
-     * source-event context (cron tick metadata, channel message, etc.) — its
-     * top-level fields are exposed to the payload template under
-     * {@code event.*}. Returns {@code null} when the trigger is not
-     * dispatchable (no published revision, unsupported target type) so the
-     * caller can record the skip without erroring.
+     * source-event context (cron tick metadata, channel message, etc.) —
+     * its top-level fields are exposed to the payload template under
+     * {@code event.*}. Returns a {@link DispatchResult} so the caller
+     * can distinguish a real fire from a pre-flight skip or a runner
+     * failure and update {@code fireCount} / {@code lastFiredAt} /
+     * {@code lastError} accordingly.
      */
-    public WorkflowRunResult dispatch(TriggerEntity trigger, Map<String, Object> event) {
+    public DispatchResult dispatch(TriggerEntity trigger, Map<String, Object> event) {
         if (!"workflow".equalsIgnoreCase(trigger.getTargetType())) {
             log.warn("Trigger {} target_type {} not supported in v0; skipping fire",
                     trigger.getId(), trigger.getTargetType());
-            return null;
+            return DispatchResult.skipped(
+                    "unsupported target_type: " + trigger.getTargetType());
         }
         WorkflowGraphLoader.Loaded loaded = graphLoader.load(trigger.getTargetId());
         if (loaded.graph() == null) {
             log.info("Trigger {} dispatch skipped: no published revision for workflow {}",
                     trigger.getId(), trigger.getTargetId());
-            return null;
+            return DispatchResult.skipped(
+                    "no published revision for workflow " + trigger.getTargetId());
         }
 
-        Map<String, Object> inputs = renderInputs(trigger, event);
+        Map<String, Object> inputs;
+        try {
+            inputs = renderInputs(trigger, event);
+        } catch (Exception e) {
+            return DispatchResult.failed("payload render failed: " + e.getMessage());
+        }
         WorkflowRunRequest req = new WorkflowRunRequest(
                 trigger.getTargetId(),
                 loaded.revisionId(),
                 trigger.getWorkspaceId(),
                 "trigger:" + trigger.getId(),
                 inputs);
-        return runner.run(loaded.graph(), req);
+        try {
+            WorkflowRunResult result = runner.run(loaded.graph(), req);
+            if (result == null) {
+                return DispatchResult.failed("runner returned null result");
+            }
+            // The runner's state taxonomy: succeeded / paused / running /
+            // failed. Anything other than failed counts as a real fire — a
+            // paused run still consumed the trigger and produced a
+            // workflow_run row that the operator can resume.
+            if ("failed".equalsIgnoreCase(result.state())) {
+                return DispatchResult.failed(result.runId(),
+                        "workflow run failed: "
+                                + (result.errorMessage() == null ? "(no message)" : result.errorMessage()));
+            }
+            return DispatchResult.fired(result.runId());
+        } catch (Exception e) {
+            log.error("Trigger {} dispatch failed for workflow {}: {}",
+                    trigger.getId(), trigger.getTargetId(), e.getMessage(), e);
+            return DispatchResult.failed("runner threw: " + e.getMessage());
+        }
     }
 
     private Map<String, Object> renderInputs(TriggerEntity trigger, Map<String, Object> event) {

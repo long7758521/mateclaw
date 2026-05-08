@@ -230,14 +230,31 @@ public class TriggerScheduler {
             return; // peer is firing
         }
         try {
-            dispatcher.dispatch(live, Map.of("firedAt", Instant.now().toString()));
-            // Bump fire bookkeeping post-dispatch so a slow workflow does not
-            // delay subsequent ticks; this row update is best-effort.
-            live.setFireCount((live.getFireCount() == null ? 0L : live.getFireCount()) + 1);
-            live.setLastFiredAt(LocalDateTime.now());
+            vip.mate.trigger.dispatch.DispatchResult outcome =
+                    dispatcher.dispatch(live, Map.of("firedAt", Instant.now().toString()));
+            // Bookkeeping is honest: only a real fire bumps fireCount /
+            // lastFiredAt. Skipped (no published revision, etc.) and failed
+            // outcomes still record lastDispatchedAt + lastError so the UI
+            // can show why a cron stopped firing.
+            LocalDateTime now = LocalDateTime.now();
+            live.setLastDispatchedAt(now);
+            if (outcome != null && outcome.fired()) {
+                live.setFireCount((live.getFireCount() == null ? 0L : live.getFireCount()) + 1);
+                live.setLastFiredAt(now);
+                live.setLastError(null);
+            } else {
+                live.setLastError(outcome == null ? "dispatcher returned null" : outcome.reason());
+            }
             triggerMapper.updateById(live);
         } catch (Exception e) {
             log.error("[TriggerScheduler] trigger {} fire failed: {}", triggerId, e.getMessage(), e);
+            try {
+                live.setLastDispatchedAt(LocalDateTime.now());
+                live.setLastError("scheduler threw: " + e.getMessage());
+                triggerMapper.updateById(live);
+            } catch (Exception ignored) {
+                // Best-effort — don't let a bookkeeping failure mask the dispatch failure.
+            }
         } finally {
             lock.get().unlock();
         }

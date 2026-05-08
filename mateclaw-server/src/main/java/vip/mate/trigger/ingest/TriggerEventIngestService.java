@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import vip.mate.trigger.dispatch.DispatchResult;
 import vip.mate.trigger.dispatch.TriggerDispatcher;
 import vip.mate.trigger.model.TriggerEntity;
 import vip.mate.trigger.model.TriggerEventEntity;
@@ -118,14 +119,50 @@ public class TriggerEventIngestService {
         if (!rateLimiter.tryAcquire(trigger.getId(), limit, Instant.now())) {
             return IngestResult.dropped(trigger.getId(), Reason.RATE_LIMITED);
         }
+        DispatchResult outcome;
         try {
-            dispatcher.dispatch(trigger, envelope.data());
+            outcome = dispatcher.dispatch(trigger, envelope.data());
         } catch (Exception e) {
+            // Belt-and-suspenders — the dispatcher already wraps its own
+            // exceptions, but if anything escapes we mark it as DISPATCH_ERROR
+            // and persist last_error so the UI surfaces *why*.
             log.error("Trigger {} dispatch threw on event ingest: {}",
                     trigger.getId(), e.getMessage(), e);
+            persistDispatchOutcome(trigger, DispatchResult.failed("dispatch threw: " + e.getMessage()));
             return IngestResult.dropped(trigger.getId(), Reason.DISPATCH_ERROR);
         }
-        return IngestResult.fired(trigger.getId());
+        persistDispatchOutcome(trigger, outcome);
+        return switch (outcome.kind()) {
+            case FIRED -> IngestResult.fired(trigger.getId());
+            case SKIPPED -> IngestResult.dropped(trigger.getId(), Reason.DISPATCH_SKIPPED);
+            case FAILED -> IngestResult.dropped(trigger.getId(), Reason.DISPATCH_ERROR);
+        };
+    }
+
+    /**
+     * Update the trigger row's bookkeeping based on the dispatch outcome.
+     * Only FIRED bumps {@code fireCount} and {@code lastFiredAt} — SKIPPED
+     * and FAILED outcomes were treated as fires before, which made the
+     * stats lie. {@code lastDispatchedAt} stamps every attempt so the UI
+     * can distinguish "never attempted" from "attempted but skipped".
+     */
+    private void persistDispatchOutcome(TriggerEntity trigger, DispatchResult outcome) {
+        try {
+            LocalDateTime now = LocalDateTime.now();
+            trigger.setLastDispatchedAt(now);
+            if (outcome.fired()) {
+                trigger.setFireCount(
+                        (trigger.getFireCount() == null ? 0L : trigger.getFireCount()) + 1);
+                trigger.setLastFiredAt(now);
+                trigger.setLastError(null);
+            } else {
+                trigger.setLastError(outcome.reason());
+            }
+            triggerMapper.updateById(trigger);
+        } catch (Exception e) {
+            // Best-effort bookkeeping — never let a stats write fail ingest.
+            log.warn("Trigger {} bookkeeping update failed: {}", trigger.getId(), e.getMessage());
+        }
     }
 
     private boolean recordDedupRow(TriggerEntity trigger, TriggerEventEnvelope envelope) {
@@ -174,7 +211,11 @@ public class TriggerEventIngestService {
     }
 
     public enum Reason {
-        PATTERN_MISMATCH, BOT_SELF, DUPLICATE, RATE_LIMITED, EXHAUSTED, DISPATCH_ERROR
+        PATTERN_MISMATCH, BOT_SELF, DUPLICATE, RATE_LIMITED, EXHAUSTED,
+        /** Dispatcher returned SKIPPED — pre-flight rejected (no published revision, etc.). */
+        DISPATCH_SKIPPED,
+        /** Dispatcher returned FAILED — runner threw or workflow run ended in failed state. */
+        DISPATCH_ERROR
     }
 
     public record IngestResult(long triggerId, boolean fired, Reason droppedReason) {
