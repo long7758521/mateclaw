@@ -13,6 +13,7 @@ export async function copyToClipboard(text: string): Promise<void> {
   ta.style.left = '-9999px'
   document.body.appendChild(ta)
   ta.select()
-  document.execCommand('copy')
+  const ok = document.execCommand('copy')
   document.body.removeChild(ta)
+  if (!ok) throw new Error('Clipboard copy command failed')
 }
