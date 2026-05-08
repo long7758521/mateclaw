@@ -66,21 +66,14 @@
                 :canvas-id="`wf-${selected.id}`"
                 @select-step="onCanvasSelect"
               />
-              <aside v-if="canvasSelection" class="canvas-inspector">
-                <header>{{ t('workflows.canvas.inspector.title') }}</header>
-                <dl class="inspector-grid">
-                  <dt>{{ t('workflows.dialogs.fieldName') }}</dt><dd>{{ canvasSelection.name }}</dd>
-                  <dt>mode</dt><dd>{{ canvasSelection.modeType }}</dd>
-                  <dt v-if="canvasSelection.agentName">{{ t('workflows.canvas.nodeAgent') }}</dt>
-                  <dd v-if="canvasSelection.agentName">{{ canvasSelection.agentName }}</dd>
-                  <dt v-if="canvasSelection.expression">{{ t('workflows.canvas.nodeExpression') }}</dt>
-                  <dd v-if="canvasSelection.expression"><code>{{ canvasSelection.expression }}</code></dd>
-                </dl>
-                <details>
-                  <summary>{{ t('workflows.canvas.inspector.rawHeader') }}</summary>
-                  <pre class="inspector-raw">{{ inspectorJson }}</pre>
-                </details>
-              </aside>
+              <StepPropertyPanel
+                v-if="canvasSelection"
+                :step="selectedStep"
+                :index="canvasSelection.index"
+                @patch="onStepPatch"
+                @duplicate="onStepDuplicate"
+                @delete="onStepDelete"
+              />
             </div>
 
             <div v-else class="json-pane">
@@ -171,7 +164,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessageBox } from 'element-plus'
+import { mcConfirm } from '@/components/common/useConfirm'
 import {
   workflowApi,
   type WorkflowSummary,
@@ -182,9 +175,16 @@ import {
 } from '@/api'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas.vue'
+import StepPropertyPanel from '@/components/workflow/StepPropertyPanel.vue'
 import CreateWorkflowDialog from '@/components/workflow/CreateWorkflowDialog.vue'
 import PublishDialog from '@/components/workflow/PublishDialog.vue'
-import type { StepNodeData } from '@/composables/useWorkflowGraph'
+import type { StepNodeData, RawStep } from '@/composables/useWorkflowGraph'
+import {
+  readStepAtIndex,
+  updateStepAtIndex,
+  deleteStepAtIndex,
+  duplicateStepAtIndex,
+} from '@/composables/useWorkflowDraft'
 
 const { t } = useI18n()
 const workspaceStore = useWorkspaceStore()
@@ -222,14 +222,31 @@ const canvasSelection = ref<StepNodeData | null>(null)
 function onCanvasSelect(payload: StepNodeData | null) {
   canvasSelection.value = payload
 }
-const inspectorJson = computed(() => {
-  if (!canvasSelection.value) return ''
-  try {
-    return JSON.stringify(canvasSelection.value.raw, null, 2)
-  } catch {
-    return ''
-  }
+// The currently-selected step, re-resolved from the JSON whenever the
+// JSON changes — this is what keeps the property panel in sync after
+// the user edits a field. Falls back to the StepNodeData snapshot the
+// canvas captured if the JSON parse fails (e.g. mid-edit invalid JSON).
+const selectedStep = computed<RawStep | null>(() => {
+  const sel = canvasSelection.value
+  if (!sel) return null
+  const live = readStepAtIndex(draftJson.value, sel.index)
+  return live ?? (sel.raw as RawStep)
 })
+
+function onStepPatch(payload: { index: number; patch: Partial<RawStep> }) {
+  draftJson.value = updateStepAtIndex(draftJson.value, payload.index, payload.patch)
+  // Keep the selection alive so the panel doesn't blink between renders.
+  // The re-derived selectedStep computed will pick up the new fields.
+}
+
+function onStepDuplicate(payload: { index: number }) {
+  draftJson.value = duplicateStepAtIndex(draftJson.value, payload.index)
+}
+
+function onStepDelete(payload: { index: number }) {
+  draftJson.value = deleteStepAtIndex(draftJson.value, payload.index)
+  canvasSelection.value = null
+}
 
 const createDialogOpen = ref(false)
 const publishDialogOpen = ref(false)
@@ -277,6 +294,11 @@ const STEP_TEMPLATES: Record<string, object> = {
     mode: {
       type: 'await_approval',
       approvalKind: 'manual',
+      // approverChannels is required by the schema validator. Default
+      // to ['web'] — the operator UI surface — so an inserted template
+      // compiles right away. Authors can swap to feishu / dingtalk /
+      // wecom etc. once they wire those channels.
+      approverChannels: ['web'],
       approvalMessage: 'Please review and approve',
       timeoutSecs: 3600,
     },
@@ -486,20 +508,13 @@ async function onPublishSubmit(payload: { note: string }) {
 async function remove() {
   if (!selected.value) return
   const name = selected.value.name ?? ''
-  try {
-    await ElMessageBox.confirm(
-      t('workflows.dialogs.deleteContent', { name }),
-      t('workflows.dialogs.deleteTitle'),
-      {
-        confirmButtonText: t('workflows.actions.delete'),
-        cancelButtonText: t('common.cancel'),
-        type: 'warning',
-      }
-    )
-  } catch {
-    // user cancelled — nothing to do
-    return
-  }
+  const ok = await mcConfirm({
+    title: t('workflows.dialogs.deleteTitle'),
+    message: t('workflows.dialogs.deleteContent', { name }),
+    confirmText: t('workflows.actions.delete'),
+    tone: 'danger',
+  })
+  if (!ok) return
   busy.value = true
   try {
     await workflowApi.delete(selected.value.id)
@@ -874,8 +889,15 @@ button:disabled {
   flex: 1 1 auto;
   min-width: 0;
 }
-.canvas-pane > .canvas-inspector {
-  flex: 0 0 240px;
+.canvas-pane > .step-panel {
+  flex: 0 0 280px;
+  max-height: 540px;
+}
+@media (max-width: 1100px) {
+  .canvas-pane > .step-panel {
+    flex: 0 0 auto;
+    max-height: 360px;
+  }
 }
 .canvas-inspector {
   background: var(--mc-bg-elevated, rgba(0, 0, 0, 0.02));

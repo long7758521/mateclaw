@@ -28,37 +28,52 @@ public class TriggerController {
     private final TriggerService triggerService;
     private final TriggerEventIngestService ingestService;
 
-    @Operation(summary = "List triggers in a workspace.")
+    @Operation(summary = "List triggers in the caller's workspace.")
     @GetMapping
-    public R<List<TriggerEntity>> list(@RequestParam("workspaceId") long workspaceId) {
+    public R<List<TriggerEntity>> list(@RequestHeader("X-Workspace-Id") long workspaceId) {
         return R.ok(triggerService.listByWorkspace(workspaceId));
     }
 
-    @Operation(summary = "Get a trigger by id.")
+    @Operation(summary = "Get a trigger by id, scoped to the caller's workspace.")
     @GetMapping("/{id}")
-    public R<TriggerEntity> get(@PathVariable long id) {
-        TriggerEntity row = triggerService.get(id);
+    public R<TriggerEntity> get(@PathVariable long id,
+                                @RequestHeader("X-Workspace-Id") long workspaceId) {
+        TriggerEntity row = triggerService.get(id, workspaceId);
         if (row == null) return R.fail("trigger not found: " + id);
         return R.ok(row);
     }
 
     @Operation(summary = "Create a trigger; if enabled, registers it with the scheduler.")
     @PostMapping
-    public R<TriggerEntity> create(@RequestBody TriggerEntity trigger) {
-        return R.ok(triggerService.create(trigger));
+    public R<TriggerEntity> create(@RequestBody TriggerEntity trigger,
+                                   @RequestHeader("X-Workspace-Id") long workspaceId) {
+        // The controller forces workspace from the trusted header — the
+        // body's workspaceId is ignored so a caller can't plant a trigger
+        // into another workspace by tweaking the JSON.
+        try {
+            return R.ok(triggerService.create(trigger, workspaceId));
+        } catch (IllegalArgumentException e) {
+            return R.fail(e.getMessage());
+        }
     }
 
     @Operation(summary = "Update a trigger; pattern_version bumps when the cron expression changes.")
     @PutMapping("/{id}")
-    public R<TriggerEntity> update(@PathVariable long id, @RequestBody TriggerEntity trigger) {
-        trigger.setId(id);
-        return R.ok(triggerService.update(trigger));
+    public R<TriggerEntity> update(@PathVariable long id,
+                                   @RequestBody TriggerEntity trigger,
+                                   @RequestHeader("X-Workspace-Id") long workspaceId) {
+        try {
+            return R.ok(triggerService.update(id, workspaceId, trigger));
+        } catch (IllegalArgumentException e) {
+            return R.fail(e.getMessage());
+        }
     }
 
     @Operation(summary = "Delete a trigger and unregister its schedule.")
     @DeleteMapping("/{id}")
-    public R<Void> delete(@PathVariable long id) {
-        triggerService.delete(id);
+    public R<Void> delete(@PathVariable long id,
+                          @RequestHeader("X-Workspace-Id") long workspaceId) {
+        triggerService.delete(id, workspaceId);
         return R.ok();
     }
 

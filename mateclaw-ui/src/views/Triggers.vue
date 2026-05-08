@@ -78,12 +78,14 @@
               <small class="pattern-hint">{{ patternHint }}</small>
             </label>
             <label>{{ t('triggers.fields.targetType') }}
-              <select v-model="formState.targetType">
+              <!-- v0 only ships the workflow dispatcher; agent target is
+                   reserved for v1 and rejected by the API to avoid the
+                   "looks enabled, never fires" trap. -->
+              <select v-model="formState.targetType" disabled>
                 <option value="workflow">workflow</option>
-                <option value="agent">agent</option>
               </select>
             </label>
-            <label v-if="formState.targetType === 'workflow'">{{ t('triggers.fields.targetId') }}
+            <label>{{ t('triggers.fields.targetId') }}
               <select v-model.number="formState.targetId">
                 <option v-if="!availableWorkflows.length" :value="0">
                   {{ t('triggers.targetWorkflowEmpty') }}
@@ -92,9 +94,6 @@
                   #{{ wf.id }} — {{ wf.name || t('triggers.unnamed') }}
                 </option>
               </select>
-            </label>
-            <label v-else>{{ t('triggers.fields.targetId') }}
-              <input v-model.number="formState.targetId" type="number" />
             </label>
             <label>{{ t('triggers.fields.ratePerMin') }}
               <input v-model.number="formState.rateLimitPerMin" type="number" />
@@ -131,6 +130,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { ElMessage } from 'element-plus'
+import { mcConfirm } from '@/components/common/useConfirm'
 import { triggerApi, type TriggerSummary, workflowApi, type WorkflowSummary } from '@/api'
 import { useWorkspaceStore } from '@/stores/useWorkspaceStore'
 
@@ -258,7 +259,7 @@ async function save() {
     formOpen.value = false
     await reload()
   } catch (e) {
-    window.alert(t('triggers.saveFailed', { msg: (e as Error).message }))
+    ElMessage.error(t('triggers.saveFailed', { msg: (e as Error).message }))
   } finally {
     busy.value = false
   }
@@ -269,17 +270,23 @@ async function toggleEnabled(row: TriggerSummary) {
     await triggerApi.update(row.id, { ...row, enabled: !row.enabled })
     await reload()
   } catch (e) {
-    window.alert(t('triggers.toggleFailed', { msg: (e as Error).message }))
+    ElMessage.error(t('triggers.toggleFailed', { msg: (e as Error).message }))
   }
 }
 
 async function remove(row: TriggerSummary) {
-  if (!window.confirm(t('triggers.deleteConfirm', { name: row.name || String(row.id) }))) return
+  const ok = await mcConfirm({
+    title: t('triggers.actions.delete'),
+    message: t('triggers.deleteConfirm', { name: row.name || String(row.id) }),
+    confirmText: t('triggers.actions.delete'),
+    tone: 'danger',
+  })
+  if (!ok) return
   try {
     await triggerApi.delete(row.id)
     await reload()
   } catch (e) {
-    window.alert(t('triggers.deleteFailed', { msg: (e as Error).message }))
+    ElMessage.error(t('triggers.deleteFailed', { msg: (e as Error).message }))
   }
 }
 
