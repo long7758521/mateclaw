@@ -147,16 +147,16 @@ public class TemplateService {
 
         // 4. Pre-bind skills the template declares so a hired agent is
         // usable out of the box ("数据分析师" already knows SQL, "代码审查员"
-        // already has the test-driven-development playbook). Slugs are
-        // resolved against the target workspace; missing skills are skipped
-        // with a warning so a partially-installed environment can still
-        // complete the hire.
-        applyDefaultSkillBindings(template, created, workspaceId);
+        // already has the test-driven-development playbook). Resolution
+        // failures (slug missing in this workspace) are skipped with a
+        // warning; bind-service exceptions still propagate and roll back
+        // the @Transactional hire — see helper Javadoc.
+        applyDefaultSkillBindings(template, created);
 
-        // 5. Pre-bind any standalone tools the template wants. Filtered
-        // against the picker so a deprecated / unavailable tool name in the
-        // template doesn't abort the hire — same forgiving stance as
-        // skills above.
+        // 5. Pre-bind any standalone tools the template wants. Picker
+        // outage and unknown names are dropped with a warning; a
+        // setToolBindings exception still propagates (same contract as
+        // skills) — see helper Javadoc.
         applyDefaultToolBindings(template, created);
 
         return created;
@@ -164,14 +164,38 @@ public class TemplateService {
 
     /**
      * Resolve {@link TemplateDTO#getDefaultSkillSlugs()} to skill ids inside
-     * {@code workspaceId} and pre-bind them on the freshly-created agent.
-     * Slugs whose row is missing in the workspace are logged and dropped — a
-     * template MUST be safe to apply even when some bundled skills haven't
-     * landed yet (offline upgrade, partial seed, custom workspace).
+     * the agent's own workspace and pre-bind them.
+     *
+     * <p><b>Failure contract — read carefully.</b>
+     * <ul>
+     *   <li><b>Resolution failures</b> (slug not present in the agent's
+     *       workspace, blank entries) → logged and dropped. A template MUST
+     *       stay applyable on an offline upgrade or partial-seed install
+     *       where some bundled skills haven't landed yet.</li>
+     *   <li><b>Service-layer failures</b>
+     *       ({@link AgentBindingService#setSkillBindings} throws — e.g. a
+     *       race deletes the skill row between resolve and bind, or the
+     *       workspace check rejects it) → <em>propagate</em>. Because
+     *       {@link #applyTemplate} runs under {@code @Transactional}, this
+     *       rolls back the whole hire. That's deliberate: such a throw is
+     *       a real wiring/race problem, and pretending the hire succeeded
+     *       would leave the user with a half-configured agent.</li>
+     * </ul>
+     *
+     * <p>Reads the workspace off the just-persisted {@link AgentEntity}
+     * rather than a separate parameter so the lookup and the validator
+     * inside {@code AgentBindingService.requireSameWorkspace} can never
+     * disagree on which workspace they're talking about.
      */
-    private void applyDefaultSkillBindings(TemplateDTO template, AgentEntity created, Long workspaceId) {
+    private void applyDefaultSkillBindings(TemplateDTO template, AgentEntity created) {
         List<String> slugs = template.getDefaultSkillSlugs();
         if (slugs == null || slugs.isEmpty()) return;
+
+        // Mirror the fallback inside AgentBindingService.requireSameWorkspace:
+        // a null workspace_id on a row is treated as workspace 1, so the
+        // lookup needs to agree or we'd silently turn `eq(workspaceId, null)`
+        // into `IS NULL` and match nothing.
+        Long workspaceId = created.getWorkspaceId() == null ? 1L : created.getWorkspaceId();
 
         List<Long> resolvedIds = new ArrayList<>();
         for (String slug : slugs) {
@@ -198,6 +222,11 @@ public class TemplateService {
      * {@link AgentBindingService#setToolBindings} sees only resolvable names
      * — its own validation would otherwise abort the call on the first
      * unknown name and leave the agent with no tool bindings at all.
+     *
+     * <p>Failure contract mirrors {@link #applyDefaultSkillBindings}:
+     * picker outage and unknown names are dropped with a warning; an
+     * exception from {@code setToolBindings} itself still propagates and
+     * rolls back the hire.
      */
     private void applyDefaultToolBindings(TemplateDTO template, AgentEntity created) {
         List<String> names = template.getDefaultToolNames();
