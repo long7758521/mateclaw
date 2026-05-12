@@ -17,7 +17,9 @@ import vip.mate.system.repository.SystemSettingMapper;
 import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.model.WikiChunkEntity;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
+import vip.mate.wiki.model.WikiPageEntity;
 import vip.mate.wiki.repository.WikiChunkMapper;
+import vip.mate.wiki.repository.WikiPageMapper;
 import vip.mate.wiki.repository.WikiRawMaterialMapper;
 
 import java.nio.ByteBuffer;
@@ -46,6 +48,7 @@ import java.util.Set;
 public class WikiEmbeddingService {
 
     private final WikiChunkMapper chunkMapper;
+    private final WikiPageMapper pageMapper;
     private final WikiRawMaterialMapper rawMaterialMapper;
     private final WikiProperties properties;
     private final EmbeddingModelFactory factory;
@@ -449,6 +452,74 @@ public class WikiEmbeddingService {
         if (lastSpace > halfChunk) return lastSpace + 1;
 
         return end; // hard cut
+    }
+
+    /**
+     * Embed a wiki page's content directly so the semantic retriever can match
+     * vocabulary that exists in the synthesised page but not in any source
+     * raw's chunks (typical for transformation-generated synthesis pages).
+     * Idempotent: skips when the stored embedding is already current for the
+     * resolved model + input version.
+     *
+     * @return {@code true} when the page row was updated with a fresh embedding
+     */
+    public boolean embedPage(Long pageId) {
+        if (pageId == null) return false;
+        WikiPageEntity page = pageMapper.selectById(pageId);
+        if (page == null) {
+            log.warn("[WikiEmbedding] embedPage: page not found id={}", pageId);
+            return false;
+        }
+        Resolved r = resolveForKb(page.getKbId());
+        if (r == null) {
+            log.debug("[WikiEmbedding] embedPage: no embedding model for kbId={}", page.getKbId());
+            return false;
+        }
+        String inputVersion = currentInputVersion();
+        // Short-circuit when this page is already embedded against the same
+        // model + input format — nothing to do.
+        if (page.getEmbedding() != null
+                && r.modelName().equals(page.getEmbeddingModel())
+                && inputVersion.equals(page.getEmbeddingTextVersion())) {
+            return false;
+        }
+
+        String input = buildPageEmbeddingInput(page);
+        if (input.isBlank()) return false;
+        int maxChars = Math.max(500, properties.getEmbeddingMaxChars());
+        if (input.length() > maxChars) input = input.substring(0, maxChars);
+
+        try {
+            EmbeddingResponse resp = r.model().call(new EmbeddingRequest(List.of(input), null));
+            float[] vec = resp.getResults().get(0).getOutput();
+            page.setEmbedding(floatsToBytes(vec));
+            page.setEmbeddingModel(r.modelName());
+            page.setEmbeddingTextVersion(inputVersion);
+            pageMapper.updateById(page);
+            log.info("[WikiEmbedding] Embedded page id={} kbId={} model={} ({} chars)",
+                    pageId, page.getKbId(), r.modelName(), input.length());
+            return true;
+        } catch (Exception e) {
+            log.warn("[WikiEmbedding] embedPage failed id={}: {}", pageId, e.getMessage());
+            return false;
+        }
+    }
+
+    /** Concatenates the fields that best capture a page's topic — title +
+     *  summary + content prefix — so the embedding picks up both the
+     *  vocabulary the LLM authored and the source-derived material. */
+    private String buildPageEmbeddingInput(WikiPageEntity page) {
+        StringBuilder sb = new StringBuilder();
+        if (page.getTitle() != null && !page.getTitle().isBlank()) {
+            sb.append("# ").append(page.getTitle()).append("\n\n");
+        }
+        if (page.getSummary() != null && !page.getSummary().isBlank()) {
+            sb.append(page.getSummary()).append("\n\n");
+        }
+        if (page.getContent() != null && !page.getContent().isBlank()) {
+            sb.append(page.getContent());
+        }
+        return sb.toString();
     }
 
     /**

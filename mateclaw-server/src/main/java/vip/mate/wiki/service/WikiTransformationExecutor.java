@@ -58,6 +58,12 @@ public class WikiTransformationExecutor {
     @Autowired(required = false)
     private WikiPageService pageService;
 
+    /** Optional. When wired, every persisted synthesis page is embedded so
+     *  the semantic retriever can surface it on terms that exist only in the
+     *  transformation output (not in any source raw's chunks). */
+    @Autowired(required = false)
+    private WikiEmbeddingService embeddingService;
+
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper =
             new com.fasterxml.jackson.databind.ObjectMapper();
 
@@ -374,6 +380,20 @@ public class WikiTransformationExecutor {
             if (persisted == null) persisted = existing;
             log.info("[WikiTransformation] updated existing synthesis page slug={} pageId={} from run={}",
                     slug, persisted.getId(), run.getId());
+        }
+
+        // Fire-and-forget page-level embedding so semantic search can match
+        // vocabulary the LLM authored which isn't present in the source raw's
+        // chunks (e.g. "AM-GM", "柯西不等式" derived from a garbled OCR PDF).
+        if (embeddingService != null) {
+            final Long pid = persisted.getId();
+            WORKER.submit(() -> {
+                try { embeddingService.embedPage(pid); }
+                catch (Exception ee) {
+                    log.warn("[WikiTransformation] post-save embedPage failed pageId={}: {}",
+                            pid, ee.getMessage());
+                }
+            });
         }
         return persisted;
     }
