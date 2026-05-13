@@ -18,6 +18,11 @@ RUN pnpm install --frozen-lockfile
 COPY mateclaw-ui/ ./
 # Override outDir: vite.config.ts writes to ../mateclaw-server/…/static which
 # is outside this container; call vite directly to control --outDir.
+# The earlier escape hatch (NODE_OPTIONS=--max-old-space-size=6144) was
+# retired after the workflow route adopted precise Monaco imports + async
+# component loading + named manualChunks; the single-chunk peak now sits
+# below ~1 GB so the default Node heap is enough. Re-add the flag if a
+# future feature reintroduces a 4 MB+ chunk and the build OOMs.
 # Skipping vue-tsc here is intentional — type errors are caught in CI, not in
 # the production Docker image build.
 RUN pnpm exec vite build --outDir /static --emptyOutDir

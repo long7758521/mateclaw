@@ -2178,6 +2178,7 @@ export default {
     tabs: {
       canvas: 'Canvas',
       json: 'JSON',
+      runs: 'Runs ({count})',
     },
     canvas: {
       empty: 'The current draft has no steps. Add one in the JSON editor or pick a template.',

@@ -2190,6 +2190,7 @@ export default {
     tabs: {
       canvas: '画布视图',
       json: 'JSON 编辑',
+      runs: '运行 ({count})',
     },
     canvas: {
       empty: '当前草稿没有任何步骤，先在 JSON 编辑器中添加步骤或选择一个模板。',
