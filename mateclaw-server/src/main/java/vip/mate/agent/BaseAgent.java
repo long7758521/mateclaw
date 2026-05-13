@@ -15,6 +15,7 @@ import vip.mate.llm.routing.MediaCaptionService;
 import vip.mate.llm.routing.MultimodalRouter;
 import vip.mate.llm.routing.model.MultimodalRoutingDecision;
 import vip.mate.llm.service.ModelCapabilityService;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import vip.mate.workspace.conversation.ConversationService;
 import vip.mate.workspace.conversation.model.MessageContentPart;
 import vip.mate.workspace.conversation.model.MessageEntity;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -328,7 +330,88 @@ public abstract class BaseAgent {
         while (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof UserMessage) {
             messages.remove(messages.size() - 1);
         }
+
+        // Head guard — orphan tool-response strip.
+        //
+        // Independent of the compaction pair-safe boundary in
+        // ConversationWindowManager: that one protects the *compaction* cut,
+        // this one protects the *pagination* cut. listRecentMessages returns
+        // the last N rows verbatim, and the first row of that page can be a
+        // ToolResponseMessage whose owning AssistantMessage sat one row
+        // earlier — i.e. outside the page. Sending such a sequence to any
+        // OpenAI-compatible provider returns 400 because every tool response
+        // must be preceded by an assistant message issuing that tool_call_id.
+        //
+        // The boundary prepend earlier inserts a SystemMessage at the head;
+        // the orphan, if present, sits at index 1 in that case. Skip leading
+        // SystemMessages and drop any ToolResponseMessage whose response ids
+        // are all unmatched by the AssistantMessages still in scope.
+        //
+        // Dropping is correct rather than expanding backward to fetch the
+        // missing assistant: if the AssistantMessage is outside the window,
+        // its content is already lost to the model anyway, and the boundary
+        // summary (if any) covers it. Keeping the orphan would just trade a
+        // dropped row for a 400.
+        stripHeadOrphanToolResponses(messages, agentName);
         return messages;
+    }
+
+    /**
+     * Drop leading {@link ToolResponseMessage}s whose response ids cannot be
+     * matched against any {@link AssistantMessage} tool_call id in the list.
+     * Leaves any leading {@link SystemMessage}s (boundary rows, system prompts)
+     * intact and continues scanning past them.
+     *
+     * <p>Package-private + static so unit tests can drive it without standing
+     * up a full BaseAgent subclass.
+     */
+    static int stripHeadOrphanToolResponses(List<Message> messages, String agentName) {
+        if (messages.isEmpty()) return 0;
+
+        // Collect every tool_call id issued by any AssistantMessage in scope.
+        Set<String> issuedIds = new HashSet<>();
+        for (Message m : messages) {
+            if (m instanceof AssistantMessage am && am.getToolCalls() != null) {
+                for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
+                    if (tc.id() != null && !tc.id().isEmpty()) {
+                        issuedIds.add(tc.id());
+                    }
+                }
+            }
+        }
+
+        int dropped = 0;
+        int i = 0;
+        while (i < messages.size()) {
+            Message m = messages.get(i);
+            if (m instanceof SystemMessage) {
+                // Boundary rows / system prompts pass through; advance and
+                // keep looking for orphan tool responses that sit behind them.
+                i++;
+                continue;
+            }
+            if (m instanceof ToolResponseMessage trm) {
+                boolean allOrphan = trm.getResponses().stream()
+                        .map(ToolResponseMessage.ToolResponse::id)
+                        .filter(id -> id != null && !id.isEmpty())
+                        .allMatch(id -> !issuedIds.contains(id));
+                if (allOrphan) {
+                    messages.remove(i);
+                    dropped++;
+                    continue; // re-examine the new messages[i]
+                }
+            }
+            // First non-orphan, non-system message — stop. Deeper orphans are
+            // upstream bugs (every other call path keeps pairs together);
+            // dropping aggressively from here on would mask those instead of
+            // surfacing them in logs.
+            break;
+        }
+        if (dropped > 0) {
+            log.info("[{}] Stripped {} leading orphan ToolResponseMessage(s) — owning AssistantMessage was outside the recent window",
+                    agentName, dropped);
+        }
+        return dropped;
     }
 
     /**
