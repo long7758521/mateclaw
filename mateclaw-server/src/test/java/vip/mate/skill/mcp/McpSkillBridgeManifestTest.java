@@ -109,6 +109,41 @@ class McpSkillBridgeManifestTest {
     }
 
     @Test
+    @DisplayName("virtual id encoding round-trips for Snowflake-magnitude server ids (regression)")
+    void virtualIdRoundTripsForLargeSnowflakeIds() {
+        // 2054864660577071106 is a real Snowflake observed in the wild;
+        // the previous BASE + serverId scheme overflowed signed long for
+        // ids of this magnitude, producing negative virtual ids that
+        // failed isVirtualMcpSkillId and broke the skill detail lookup.
+        long[] cases = {1L, 1_000_001L, 2_054_864_660_577_071_106L, (1L << 61), (1L << 62) - 1L};
+        for (long sid : cases) {
+            McpServerEntity server = newServer(sid, "anything");
+            long vid = McpSkillBridge.virtualIdFor(server);
+            assertTrue(McpSkillBridge.isVirtualMcpSkillId(vid),
+                    "vid for serverId=" + sid + " should be classified as MCP virtual: got 0x"
+                            + Long.toHexString(vid));
+            assertEquals(sid, McpSkillBridge.extractMcpServerId(vid),
+                    "extract did not round-trip for serverId=" + sid);
+        }
+    }
+
+    @Test
+    @DisplayName("MCP and ACP virtual id spaces never overlap, real Snowflake ids classify as neither")
+    void virtualIdSpacesAreDisjoint() {
+        long serverId = 2_054_864_660_577_071_106L; // Snowflake magnitude
+        McpServerEntity server = newServer(serverId, "anything");
+        long mcpVid = McpSkillBridge.virtualIdFor(server);
+
+        assertTrue(McpSkillBridge.isVirtualMcpSkillId(mcpVid));
+        // An MCP virtual id must NOT be misread as ACP.
+        assertTrue(!vip.mate.skill.acp.AcpSkillBridge.isVirtualAcpSkillId(mcpVid),
+                "MCP vid 0x" + Long.toHexString(mcpVid) + " leaked into the ACP range");
+        // Real Snowflake ids (positive, top bits clear) must be neither.
+        assertTrue(!McpSkillBridge.isVirtualMcpSkillId(serverId));
+        assertTrue(!vip.mate.skill.acp.AcpSkillBridge.isVirtualAcpSkillId(serverId));
+    }
+
+    @Test
     @DisplayName("CJK-only server names slug to a stable id-based fallback instead of an all-dash collision")
     void cjkOnlyNameFallsBackToIdSlug() {
         McpServerEntity a = newServer(42L, "知识图谱对象数据查询服务");

@@ -58,23 +58,36 @@ import java.util.concurrent.ConcurrentHashMap;
  *       page always shows current state.</li>
  * </ul>
  *
- * <p>ID namespace: virtual skill ids use a high sentinel
- * {@link #VIRTUAL_ID_BASE} different from the MCP bridge's, so the two
- * id spaces never collide and a callsite can dispatch on which bridge
- * owns an id without coordination.
+ * <p>ID namespace: virtual ACP ids set both top bits of a {@code long}
+ * (bit 63 + bit 62) so they sit in a different type-tag than MCP
+ * (which sets only bit 63 — see
+ * {@link vip.mate.skill.mcp.McpSkillBridge}). The bottom 62 bits carry
+ * the underlying endpointId. The earlier {@code 8e18 + endpointId}
+ * addition scheme broke once Snowflake-issued endpoint ids crossed
+ * the {@code 1e17} bound, so the bit-tagged layout replaces it.
+ *
+ * <p>{@code VIRTUAL_ID_BASE + smallId} still equals
+ * {@code VIRTUAL_ID_BASE | smallId} for any {@code smallId < 2^62}, so
+ * test fixtures that build virtual ids by addition continue to work.
  */
 @Slf4j
 @Service
 public class AcpSkillBridge {
 
+    /** Type tag for ACP virtual ids: bits 63 + 62 set. */
+    public static final long VIRTUAL_ID_BASE = 0xC000000000000000L;
     /**
-     * High sentinel for ACP virtual id space. Distinct from
-     * {@code McpSkillBridge.VIRTUAL_ID_BASE} (9e18) so the two virtual
-     * spaces are partitionable by simple range checks.
+     * @deprecated The bound is implicit in the bit-tag layout — any id
+     *     whose top two bits are both set is an ACP virtual id. Kept
+     *     for source compatibility with earlier callers.
      */
-    public static final long VIRTUAL_ID_BASE = 8_000_000_000_000_000_000L;
-    /** Upper bound, exclusive — anything in [BASE, BASE + 1e17) is ours. */
-    public static final long VIRTUAL_ID_BOUND = VIRTUAL_ID_BASE + 100_000_000_000_000_000L;
+    @Deprecated
+    public static final long VIRTUAL_ID_BOUND = -1L; // 0xFFFFFFFFFFFFFFFFL
+
+    /** Selects the top-two type-tag bits. */
+    private static final long TAG_MASK = 0xC000000000000000L;
+    /** Selects the bottom 62 bits that carry the original endpoint id. */
+    private static final long ID_MASK = 0x3FFFFFFFFFFFFFFFL;
 
     private final AcpEndpointService endpointService;
     private final AcpDelegationService delegationService;
@@ -100,16 +113,22 @@ public class AcpSkillBridge {
     }
 
     public static boolean isVirtualAcpSkillId(Long id) {
-        return id != null && id >= VIRTUAL_ID_BASE && id < VIRTUAL_ID_BOUND;
+        return id != null && (id & TAG_MASK) == VIRTUAL_ID_BASE;
     }
 
     public static Long extractEndpointId(Long virtualId) {
         if (!isVirtualAcpSkillId(virtualId)) return null;
-        return virtualId - VIRTUAL_ID_BASE;
+        return virtualId & ID_MASK;
     }
 
     public static long virtualIdFor(AcpEndpointEntity endpoint) {
-        return VIRTUAL_ID_BASE + endpoint.getId();
+        long eid = endpoint.getId();
+        if ((eid & TAG_MASK) != 0L) {
+            throw new IllegalStateException(
+                    "ACP endpoint id 0x" + Long.toHexString(eid)
+                            + " uses the top two bits — would collide with the virtual id type tag");
+        }
+        return VIRTUAL_ID_BASE | eid;
     }
 
     @PostConstruct
