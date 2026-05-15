@@ -18,6 +18,15 @@
       <div class="page-stage">
         <div class="table-wrap">
           <table class="data-table">
+            <colgroup>
+              <col style="width: 22%; min-width: 160px" />
+              <col style="width: 18%; min-width: 140px" />
+              <col style="width: 16%; min-width: 130px" />
+              <col style="width: 12%; min-width: 100px" />
+              <col style="width: 12%; min-width: 100px" />
+              <col style="width: 8%; min-width: 70px" />
+              <col style="width: 12%; min-width: 100px" />
+            </colgroup>
             <thead>
               <tr>
                 <th>{{ t('cronJobs.columns.name') }}</th>
