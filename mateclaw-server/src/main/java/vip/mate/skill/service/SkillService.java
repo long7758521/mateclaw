@@ -5,8 +5,10 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import vip.mate.exception.MateClawException;
+import vip.mate.skill.event.SkillRemovedEvent;
 import vip.mate.skill.model.SkillEntity;
 import vip.mate.skill.repository.SkillFileMapper;
 import vip.mate.skill.repository.SkillMapper;
@@ -47,6 +49,13 @@ public class SkillService {
     private final SkillWorkspaceManager workspaceManager;
     private final SkillWorkspaceProperties workspaceProperties;
     private final SkillSecretService skillSecretService;
+    /**
+     * Fires {@link SkillRemovedEvent} on both uninstall and hard-delete so
+     * the agent-binding listener (and any future subscriber) can scrub
+     * dependent rows — without this, {@code mate_agent_skill} keeps orphan
+     * rows that the UI can no longer clear from the picker.
+     */
+    private final ApplicationEventPublisher eventPublisher;
     private vip.mate.skill.runtime.SkillRuntimeService runtimeService;
 
     /**
@@ -414,6 +423,10 @@ public class SkillService {
         skillMapper.deleteById(id); // logical delete (deleted=1)
         log.info("Uninstalled skill (logical delete + archive): {}", skill.getName());
 
+        // Notify listeners (e.g. agent-binding cleanup) so dependent rows
+        // referencing this skill_id don't outlive the row itself.
+        eventPublisher.publishEvent(new SkillRemovedEvent(id, skill.getName()));
+
         if ("archive".equals(workspaceProperties.getDeletePolicy())) {
             workspaceManager.archiveWorkspace(skill.getName());
         }
@@ -447,6 +460,10 @@ public class SkillService {
             log.info("Hard-deleted {} bundle file row(s) for skill {}", filesDropped, skill.getName());
         }
         log.info("Hard-deleted skill (physical delete + purge): {}", skill.getName());
+
+        // Same notification as the uninstall path — agent-binding cleanup
+        // applies regardless of which delete flavor the admin chose.
+        eventPublisher.publishEvent(new SkillRemovedEvent(id, skill.getName()));
 
         // RFC-091 settings bridge — purge any per-skill secrets so a
         // future skill reusing this id doesn't inherit stale credentials.
