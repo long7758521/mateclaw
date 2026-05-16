@@ -486,7 +486,36 @@ public class AgentBindingService {
             "extract_document_text",
             "extract_pdf_text",
             "extract_docx_text",
-            "readMateClawDoc"
+            "readMateClawDoc",
+            // Wiki knowledge-base tools. These are agent-wide capabilities
+            // tied to whichever knowledge base is attached to the agent, and
+            // are never declared inside any skill manifest. Like the document
+            // and media generators above, the skill-binding allowlist would
+            // otherwise strip every wiki_* tool from any agent that has a
+            // skill bound — so the agent could no longer read or write its
+            // own knowledge base ("save this result into the knowledge base"
+            // failed with a not-found / no-permission style error). Each tool
+            // degrades with a clear "no knowledge base" message when the
+            // agent has none attached, so advertising them unconditionally
+            // is safe.
+            "wiki_read_page",
+            "wiki_list_pages",
+            "wiki_search_pages",
+            "wiki_semantic_search",
+            "wiki_trace_source",
+            "wiki_create_page",
+            "wiki_compile_page",
+            "wiki_read_many",
+            "wiki_archive_page",
+            "wiki_unarchive_page",
+            "wiki_delete_page",
+            "wiki_related_pages",
+            "wiki_explain_relation",
+            "wiki_enrich_page",
+            "wiki_list_transformations",
+            "wiki_apply_transformation",
+            "wiki_apply_transformation_to_page",
+            "wiki_aggregate_transformation"
     );
 
     private ResolvedSkill findResolvedSkillById(Long skillId) {

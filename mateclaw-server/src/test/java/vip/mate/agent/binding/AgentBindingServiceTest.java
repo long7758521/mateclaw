@@ -358,6 +358,27 @@ class AgentBindingServiceTest {
     }
 
     @Test
+    @DisplayName("Issue #143: 绑定任意工具后，wiki 知识库工具仍留在 effective allowlist（可读写知识库）")
+    void wikiToolsSurviveSkillBindingAllowlist() {
+        // Reproduce issue #143: once an agent has any binding, the effective
+        // allowlist turns on. Wiki tools live on the WikiTool bean and are
+        // never declared by a skill manifest, so before the fix they were
+        // filtered out — the agent could chat but lost its KB read/write
+        // tools and reported "no permission" when asked to save a result.
+        seedBuiltinTool("builtin_probe");
+        bindingService.setToolBindings(agentId, List.of("builtin_probe"));
+
+        Set<String> effective = bindingService.getEffectiveToolNames(agentId);
+        assertNotNull(effective, "binding 非空时应返回 allowlist（非 null）");
+        assertTrue(effective.contains("wiki_create_page"),
+                "wiki_create_page 必须留在 allowlist —— 否则 AI 无法把结果写入知识库（issue #143）。"
+                        + "实际 allowlist: " + effective);
+        assertTrue(effective.contains("wiki_read_page"),
+                "wiki_read_page 必须留在 allowlist —— 否则 agent 无法读取自己的知识库。"
+                        + "实际 allowlist: " + effective);
+    }
+
+    @Test
     @DisplayName("unbindTool 后 DB 里真的没行（物理 delete，不是软删留 deleted=1）")
     void unbindPhysicallyRemovesRow() {
         bindingService.bindTool(agentId, "physical_check");
