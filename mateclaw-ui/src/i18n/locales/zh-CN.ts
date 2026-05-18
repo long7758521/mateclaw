@@ -846,7 +846,7 @@ export default {
       openaiImageStatus: '复用模型管理中配置的 OpenAI API Key，无需额外配置。',
       zhipuImageApiKey: '从 bigmodel.cn 获取。CogView-3-Flash 模型免费。与视频生成共用同一 Key。',
       falImageApiKey: '从 fal.ai 获取，支持 Flux 系列图片生成模型。与视频生成共用同一 Key。',
-      googleImagenInfo: '复用模型管理中的 Google API Key。支持 Gemini 图片生成和 Imagen 4.0 模型。',
+      googleImagenInfo: '复用模型管理中的 Gemini API Key。Nano Banana Pro（Gemini 3 Pro Image）原生图片生成，支持文生图与图片编辑。',
       minimaxImageInfo: '复用视频生成中的 MiniMax API Key。image-01 模型，支持多种画面比例，最多 9 张。',
       // 视频生成
       videoEnabled: '开启后 Agent 可使用视频生成工具。需至少配置一个视频提供商的 API Key。',

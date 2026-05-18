@@ -955,7 +955,7 @@ export default {
       openaiImageStatus: 'Reuses the OpenAI API Key configured in Model Management. No extra setup needed.',
       zhipuImageApiKey: 'Get from bigmodel.cn. CogView-3-Flash model is free. Shared with video generation.',
       falImageApiKey: 'Get from fal.ai for Flux image generation models. Shared with video generation.',
-      googleImagenInfo: 'Reuses Google API Key from Model Management. Supports Gemini image generation and Imagen 4.0.',
+      googleImagenInfo: 'Reuses the Gemini API Key from Model Management. Nano Banana Pro (Gemini 3 Pro Image) native generation — text-to-image and image editing.',
       minimaxImageInfo: 'Reuses MiniMax API Key from video settings. image-01 model, multiple aspect ratios, up to 9 images.',
       videoEnabled: 'Enable to let Agent use the video generation tool. Requires at least one configured video provider.',
       videoProvider: 'Select preferred video provider. Auto mode picks the first available one.',
