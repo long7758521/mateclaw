@@ -326,18 +326,21 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     @Override
                     public void handle(com.lark.oapi.service.im.v1.model.P2ChatMemberBotAddedV1 event) {}
                 })
-                // Interactive card button clicks (Schema 2.0) — routed through cardDispatcher
+                // Interactive card button clicks (Schema 2.0) — routed through cardDispatcher.
+                // The returned P2CardActionTriggerResponse is how Schema-2.0
+                // cards update in-place; PATCH /im/v1/messages/{id} is a
+                // silent no-op for V2 cards and must not be used.
                 .onP2CardActionTrigger(new com.lark.oapi.event.cardcallback.P2CardActionTriggerHandler() {
                     @Override
                     public com.lark.oapi.event.cardcallback.model.P2CardActionTriggerResponse handle(
                             com.lark.oapi.event.cardcallback.model.P2CardActionTrigger event) {
                         if (!running.get()) return null;
                         try {
-                            handleCardActionTrigger(event);
+                            return handleCardActionTrigger(event);
                         } catch (Exception e) {
                             log.error("[feishu] Failed to handle card action: {}", e.getMessage(), e);
+                            return null;
                         }
-                        return null;
                     }
                 })
                 .build();
@@ -892,6 +895,19 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
     // ==================== Approval card ====================
 
     /**
+     * Card-button approval is the canonical path for Feishu when the
+     * dispatcher is wired. Tells {@code ChannelMessageRouter} not to
+     * auto-cancel pending approvals on subsequent user messages —
+     * users decide via clicking, not by typing {@code /approve}.
+     * Returns false only in legacy / test contexts where the
+     * dispatcher isn't injected (the inherited text-flow path applies).
+     */
+    @Override
+    public boolean usesInteractiveApprovalCards() {
+        return cardDispatcher != null;
+    }
+
+    /**
      * Render the approval notice as a Schema-2.0 interactive button card
      * so the user can approve / deny in-channel without bouncing to the
      * web UI. Falls back to the inherited markdown-text path when the
@@ -931,26 +947,43 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
     /**
      * Dispatch a {@code P2CardActionTrigger} (button click on an
      * interactive card) to the matching {@code FeishuCardKind} via the
-     * dispatcher. No-op if no dispatcher wired or no kind matches.
+     * dispatcher and propagate the kind's response back to Feishu so
+     * the card can update in-place. Returns null when no dispatcher is
+     * wired or no kind matches the action prefix — Feishu leaves the
+     * original card unchanged in that case.
      */
-    private void handleCardActionTrigger(
+    private com.lark.oapi.event.cardcallback.model.P2CardActionTriggerResponse handleCardActionTrigger(
             com.lark.oapi.event.cardcallback.model.P2CardActionTrigger event) {
         if (cardDispatcher == null || event == null || event.getEvent() == null) {
-            return;
+            return null;
         }
         com.lark.oapi.event.cardcallback.model.P2CardActionTriggerData data = event.getEvent();
         com.lark.oapi.event.cardcallback.model.CallBackAction action = data.getAction();
         if (action == null || action.getValue() == null) {
-            return;
+            return null;
         }
         Object actionField = action.getValue().get("action");
         String actionStr = actionField != null ? actionField.toString() : null;
         var kindOpt = cardDispatcher.lookupByAction(actionStr);
         if (kindOpt.isEmpty()) {
             log.debug("[feishu] No card kind registered for action={}", actionStr);
-            return;
+            return null;
         }
-        kindOpt.get().handler().handle(this, data);
+        return kindOpt.get().handler().handle(this, data);
+    }
+
+    /**
+     * Re-enter the router as if the given message arrived from this
+     * channel. Used by the tool-guard card handler to re-emit the
+     * button click as a synthetic {@code /approve <pendingId>} or
+     * {@code /deny <pendingId>} so the router runs its canonical
+     * text-approve path ({@code resolveAndConsume + replay}).
+     *
+     * <p>External callers must go through {@link #onMessage}; this is
+     * the in-package fast lane that skips the WS / webhook decode.
+     */
+    public void injectSyntheticMessage(ChannelMessage message) {
+        messageRouter.enqueue(message, this, channelEntity);
     }
 
     /**

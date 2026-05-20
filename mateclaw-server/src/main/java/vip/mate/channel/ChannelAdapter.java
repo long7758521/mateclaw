@@ -142,6 +142,24 @@ public interface ChannelAdapter {
                 vip.mate.channel.notification.ApprovalNotificationService.staticBuildText(notice));
     }
 
+    /**
+     * Does this adapter deliver approval decisions through an
+     * interactive card (button click → card.action callback) rather
+     * than the text-command flow ({@code /approve <id>} / {@code /deny <id>})?
+     *
+     * <p>Controls {@code ChannelMessageRouter}'s "non-approval message →
+     * auto-cancel pending" heuristic. The heuristic was designed for
+     * the text flow where the user is expected to type
+     * {@code /approve} and anything else is an implicit "I changed my
+     * mind". With interactive cards the user clicks a button, and
+     * unrelated chat messages during the wait window must NOT
+     * auto-cancel the pending. Default false (text flow); WeCom +
+     * Feishu (when card dispatcher is wired) override to true.
+     */
+    default boolean usesInteractiveApprovalCards() {
+        return false;
+    }
+
     // ==================== 主动推送 ====================
 
     /**

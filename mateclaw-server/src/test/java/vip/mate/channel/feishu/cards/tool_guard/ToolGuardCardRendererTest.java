@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -24,7 +25,7 @@ class ToolGuardCardRendererTest {
 
     @SuppressWarnings("unchecked")
     @Test
-    @DisplayName("rendered card carries schema 2.0, header, summary markdown, and two buttons")
+    @DisplayName("rendered card is Schema 1.0 inline: config + header + elements at root, action row wraps two buttons")
     void cardShape() {
         ApprovalNotice notice = new ApprovalNotice(
                 "pend-1", "feishu_doc_create", "Create a new Doc",
@@ -34,12 +35,20 @@ class ToolGuardCardRendererTest {
 
         Map<String, Object> card = renderer.render(notice);
 
-        assertEquals("2.0", card.get("schema"));
+        // Schema 1.0: NO 'schema' field, NO 'body' nesting — keeps the
+        // approval card and the callback-response resolved card on the
+        // same schema so Feishu's validator doesn't fault on update.
+        assertFalse(card.containsKey("schema"),
+                "Approval card must be Schema 1.0 for callback-response compatibility");
+        assertFalse(card.containsKey("body"));
+
+        Map<String, Object> config = (Map<String, Object>) card.get("config");
+        assertEquals(Boolean.TRUE, config.get("wide_screen_mode"));
+
         Map<String, Object> header = (Map<String, Object>) card.get("header");
         assertNotNull(header);
-        Map<String, Object> body = (Map<String, Object>) card.get("body");
-        List<Map<String, Object>> elements = (List<Map<String, Object>>) body.get("elements");
-        assertEquals(2, elements.size(), "expect markdown + action elements");
+        List<Map<String, Object>> elements = (List<Map<String, Object>>) card.get("elements");
+        assertEquals(2, elements.size(), "expect markdown + action row");
 
         Map<String, Object> md = elements.get(0);
         assertEquals("markdown", md.get("tag"));
@@ -47,11 +56,14 @@ class ToolGuardCardRendererTest {
         assertTrue(content.contains("feishu_doc_create"), "tool name in summary");
         assertTrue(content.contains("HIGH"), "severity in summary");
 
-        Map<String, Object> actions = elements.get(1);
-        assertEquals("action", actions.get("tag"));
-        List<Map<String, Object>> buttons = (List<Map<String, Object>>) actions.get("actions");
+        // Schema 1.0 button row — {tag:"action", actions:[primary, danger]}
+        Map<String, Object> actionRow = elements.get(1);
+        assertEquals("action", actionRow.get("tag"));
+        List<Map<String, Object>> buttons = (List<Map<String, Object>>) actionRow.get("actions");
         assertEquals(2, buttons.size());
+        assertEquals("button", buttons.get(0).get("tag"));
         assertEquals("primary", buttons.get(0).get("type"));
+        assertEquals("button", buttons.get(1).get("tag"));
         assertEquals("danger", buttons.get(1).get("type"));
     }
 
@@ -64,7 +76,7 @@ class ToolGuardCardRendererTest {
                 "{}", "MEDIUM", List.of(), "/approve pend-42", "/deny pend-42");
 
         Map<String, Object> card = renderer.render(notice);
-        List<Map<String, Object>> elements = (List<Map<String, Object>>) ((Map<String, Object>) card.get("body")).get("elements");
+        List<Map<String, Object>> elements = (List<Map<String, Object>>) card.get("elements");
         List<Map<String, Object>> buttons = (List<Map<String, Object>>) elements.get(1).get("actions");
 
         Map<String, Object> approveValue = (Map<String, Object>) buttons.get(0).get("value");
@@ -77,20 +89,28 @@ class ToolGuardCardRendererTest {
     }
 
     @Test
-    @DisplayName("buildResolvedCard returns a no-action body with the given title + template")
+    @DisplayName("buildResolvedCard returns Schema 1.0 inline layout (no schema field, elements at root) — required by Feishu callback-response validator")
     @SuppressWarnings("unchecked")
     void buildResolvedCardShape() {
         Map<String, Object> card = ToolGuardCardRenderer.buildResolvedCard(
                 "✅ 已批准", "tool foo approved by Alice", "green");
 
-        assertEquals("2.0", card.get("schema"));
+        // Schema 1.0 has NO "schema" field — callback-response validator
+        // returns 200672 if it sees Schema 2.0.
+        assertFalse(card.containsKey("schema"),
+                "Resolved card must be Schema 1.0 (no 'schema' field) for callback-response compatibility");
+        assertFalse(card.containsKey("body"),
+                "Schema 1.0 puts elements at root, NOT under 'body'");
+
+        Map<String, Object> config = (Map<String, Object>) card.get("config");
+        assertEquals(Boolean.TRUE, config.get("wide_screen_mode"));
+
         Map<String, Object> header = (Map<String, Object>) card.get("header");
         assertEquals("green", header.get("template"));
         Map<String, Object> title = (Map<String, Object>) header.get("title");
         assertEquals("✅ 已批准", title.get("content"));
 
-        Map<String, Object> body = (Map<String, Object>) card.get("body");
-        List<Map<String, Object>> elements = (List<Map<String, Object>>) body.get("elements");
+        List<Map<String, Object>> elements = (List<Map<String, Object>>) card.get("elements");
         assertEquals(1, elements.size());
         assertEquals("markdown", elements.get(0).get("tag"));
         assertTrue(((String) elements.get(0).get("content")).contains("approved by Alice"));

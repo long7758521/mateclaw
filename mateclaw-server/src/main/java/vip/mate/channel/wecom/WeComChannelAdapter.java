@@ -1280,6 +1280,15 @@ public class WeComChannelAdapter extends AbstractChannelAdapter {
      * {@link #handleMessageCallback} stashed in {@link #replyContexts}.
      */
     @Override
+    public boolean usesInteractiveApprovalCards() {
+        // Same gate as sendApprovalNotice below — without the dispatcher
+        // wired we fall back to the inherited text path, and the router
+        // should treat unrelated follow-up messages as implicit deny
+        // (existing behaviour).
+        return cardDispatcher != null;
+    }
+
+    @Override
     public void sendApprovalNotice(String targetId,
             vip.mate.channel.notification.ApprovalNotice notice) {
         if (cardDispatcher == null) {

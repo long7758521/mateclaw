@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import vip.mate.approval.ApprovalService;
-import vip.mate.approval.ApprovalWorkflowService;
 import vip.mate.channel.feishu.cards.tool_guard.ToolGuardButtonValue;
 import vip.mate.channel.feishu.cards.tool_guard.ToolGuardCardKindFactory;
 
@@ -24,7 +23,6 @@ class FeishuCardDispatcherTest {
     private FeishuCardDispatcher newDispatcher() {
         ToolGuardCardKindFactory factory = new ToolGuardCardKindFactory(
                 mock(ApprovalService.class),
-                mock(ApprovalWorkflowService.class),
                 new ObjectMapper());
         return new FeishuCardDispatcher(factory);
     }
@@ -70,12 +68,12 @@ class FeishuCardDispatcherTest {
     @DisplayName("FeishuCardKind constructor rejects blank name / prefix")
     void cardKindValidation() {
         FeishuCardKind valid = new FeishuCardKind(
-                "ok", "ok.", (n) -> java.util.Map.of(), (adapter, data) -> {});
+                "ok", "ok.", (n) -> java.util.Map.of(), (adapter, data) -> null);
         assertEquals("ok", valid.name());
 
         assertThrows(IllegalArgumentException.class,
-                () -> new FeishuCardKind("", "x.", (n) -> java.util.Map.of(), (a, d) -> {}));
+                () -> new FeishuCardKind("", "x.", (n) -> java.util.Map.of(), (a, d) -> null));
         assertThrows(IllegalArgumentException.class,
-                () -> new FeishuCardKind("ok", " ", (n) -> java.util.Map.of(), (a, d) -> {}));
+                () -> new FeishuCardKind("ok", " ", (n) -> java.util.Map.of(), (a, d) -> null));
     }
 }

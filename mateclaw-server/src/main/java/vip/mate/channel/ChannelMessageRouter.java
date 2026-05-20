@@ -554,8 +554,23 @@ public class ChannelMessageRouter {
                             denyOutcome.messagesRewritten());
                     return;
 
+                } else if (adapter.usesInteractiveApprovalCards()) {
+                    // Channel approves via button-clicks on an interactive
+                    // card, NOT via /approve text. A casual follow-up
+                    // message from the user during the wait window MUST
+                    // NOT auto-cancel the pending — the button click is
+                    // the canonical decision path. Treat the new message
+                    // as a fresh turn; the pending stays alive until the
+                    // user clicks Approve / Deny, the GC TTL expires, or
+                    // the workflow explicitly resolves it.
+                    log.info("[{}] Non-approval message while pending exists; channel uses card buttons so NOT auto-cancelling pendingId={}",
+                            adapter.getChannelType(), pending.getPendingId());
+                    // Fall through to process the new message normally.
                 } else {
                     // Non-approval message while a pending exists → treat as implicit deny.
+                    // Text-command channels rely on this: the user is told
+                    // "type /approve <id>" and anything else is an implicit
+                    // change of mind.
                     approvalService.resolve(pending.getPendingId(), message.getSenderId(), "denied");
                     conversationService.removeApprovalPlaceholders(conversationId);
                     String cancelHint = "⛔ 审批已取消。将继续处理您的新消息。";

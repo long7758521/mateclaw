@@ -60,15 +60,22 @@ public class ToolGuardCardRenderer implements FeishuCardRenderer {
         title.put("tag", "plain_text");
         title.put("content", "🛡️ 工具审批");
         Map<String, Object> header = new LinkedHashMap<>();
-        header.put("title", title);
         header.put("template", severityToTemplate(severity));
+        header.put("title", title);
 
         // Markdown summary
         Map<String, Object> markdown = new LinkedHashMap<>();
         markdown.put("tag", "markdown");
         markdown.put("content", buildSummaryMarkdown(notice, toolName, severity));
 
-        // Buttons
+        // Schema 1.0 button row — {tag:"action", actions:[buttons]}.
+        // We use Schema 1.0 throughout (not Schema 2.0) so the callback
+        // response can update this same card without a schema-version
+        // mismatch error. Schema 2.0 is supported by im/v1/message.create
+        // BUT the callback response validator only accepts Schema 1.0
+        // inline (type="raw") — once we commit to Schema 1.0 here the
+        // resolved-state card update lands cleanly. QwenPaw's
+        // production Feishu integration uses the same Schema 1.0 path.
         Map<String, Object> approveBtn = new LinkedHashMap<>();
         approveBtn.put("tag", "button");
         approveBtn.put("text", plainText("批准"));
@@ -81,47 +88,64 @@ public class ToolGuardCardRenderer implements FeishuCardRenderer {
         denyBtn.put("type", "danger");
         denyBtn.put("value", denyValue);
 
-        Map<String, Object> actionElement = new LinkedHashMap<>();
-        actionElement.put("tag", "action");
-        actionElement.put("actions", List.of(approveBtn, denyBtn));
+        Map<String, Object> actionRow = new LinkedHashMap<>();
+        actionRow.put("tag", "action");
+        actionRow.put("actions", List.of(approveBtn, denyBtn));
 
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("elements", List.of(markdown, actionElement));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("wide_screen_mode", true);
 
+        // Schema 1.0 layout — elements at root, no "schema" / "body" wrapper.
         Map<String, Object> card = new LinkedHashMap<>();
-        card.put("schema", "2.0");
+        card.put("config", config);
         card.put("header", header);
-        card.put("body", body);
+        card.put("elements", List.of(markdown, actionRow));
         return card;
     }
 
     /**
-     * Build the resolved-state card (same task_id semantics — Feishu
-     * cards are updated in-place by message_id; no task_id needed).
+     * Build the resolved-state card for the {@code
+     * P2CardActionTriggerResponse.card} payload — <b>Schema 1.0</b>
+     * inline format ({@code config / header / elements} all at root,
+     * no {@code "schema"} field, no {@code "body"} nesting).
      *
-     * @param title       headline like "✅ 已批准 by 张三"
-     * @param desc        optional detail line
-     * @param template    "green" / "red" / "grey" / "blue" — header colour
+     * <p><b>Why Schema 1.0 here</b>: the Feishu callback-response
+     * validator is the legacy validator and rejects Schema 2.0 cards
+     * with error code 200672 "卡片内容格式错误". This is different from
+     * {@code im/v1/message.create msg_type=interactive} and
+     * {@code cardkit/v1 card.create}, both of which DO accept Schema
+     * 2.0. So we keep the original approval card (sent via message
+     * create) in Schema 2.0 for the column_set button layout, but the
+     * resolved-state update has to be Schema 1.0. QwenPaw's production
+     * Feishu integration uses the same split.
+     *
+     * <p>Caller passes the resulting Map to a {@code CallBackCard}
+     * with {@code type="raw"} (NOT {@code card_json}).
+     *
+     * @param title    headline like "✅ 已批准 by 张三"
+     * @param desc     optional detail line (markdown)
+     * @param template "green" / "red" / "grey" / "blue" — header colour
      */
     public static Map<String, Object> buildResolvedCard(String title, String desc, String template) {
         Map<String, Object> titleObj = new LinkedHashMap<>();
         titleObj.put("tag", "plain_text");
         titleObj.put("content", title == null ? "" : title);
         Map<String, Object> header = new LinkedHashMap<>();
-        header.put("title", titleObj);
         header.put("template", template == null ? "grey" : template);
+        header.put("title", titleObj);
 
         Map<String, Object> markdown = new LinkedHashMap<>();
         markdown.put("tag", "markdown");
         markdown.put("content", desc == null ? "" : desc);
 
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("elements", List.of(markdown));
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("wide_screen_mode", true);
 
+        // Schema 1.0 layout — elements at root, no schema/body wrapper.
         Map<String, Object> card = new LinkedHashMap<>();
-        card.put("schema", "2.0");
+        card.put("config", config);
         card.put("header", header);
-        card.put("body", body);
+        card.put("elements", List.of(markdown));
         return card;
     }
 
