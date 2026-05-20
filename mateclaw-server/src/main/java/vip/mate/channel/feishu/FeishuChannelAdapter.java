@@ -1857,9 +1857,17 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
             if (finalContent.isBlank()) {
                 finalContent = "（无回复内容）";
             }
-            streamingCardManager.finishCard(sessionKey, finalContent);
+            // Strip any /api/v1/files/generated/{id} URLs out of the card
+            // text (replacing each with a "📎 filename" marker) AND send
+            // each cache-resolved file as a native Feishu attachment. The
+            // streaming card can only render markdown — without this hop
+            // the user sees a broken-looking download link instead of the
+            // actual file. Cache-miss URLs fall back to the user-facing
+            // retry hint that GeneratedFileScrubber emits.
+            String renderedContent = scrubAndSendAttachments(receiveId, finalContent);
+            streamingCardManager.finishCard(sessionKey, renderedContent);
             log.info("[feishu-stream] Card streaming completed: sessionKey={}, contentLen={}",
-                    sessionKey, finalContent.length());
+                    sessionKey, renderedContent.length());
             return finalContent;
 
         } catch (Exception e) {
@@ -1902,10 +1910,52 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     ? message.getReplyToken()
                     : (message.getChatId() != null ? message.getChatId() : message.getSenderId());
             if (replyTarget != null) {
-                sendMessage(replyTarget, finalContent);
+                // Same scrub-and-upload hop as the streaming card finish path —
+                // a generated-file URL in plain text would otherwise reach the
+                // user as a markdown link that opens to nothing useful in IM.
+                String renderedContent = scrubAndSendAttachments(replyTarget, finalContent);
+                sendMessage(replyTarget, renderedContent);
             }
         }
         return finalContent;
+    }
+
+    /**
+     * Run {@link GeneratedFileScrubber} over outbound text. For every
+     * {@code /api/v1/files/generated/{id}} URL the cache resolves, send
+     * the bytes as a native Feishu attachment to {@code targetId} via
+     * the existing upload path. Returns the rewritten text (URLs replaced
+     * with {@code "📎 filename"} markers for hits, retry hints for
+     * cache-misses) so the caller can use it for the text bubble / card.
+     *
+     * <p>No-op when scrubber / uploader / channel entity is missing —
+     * returns input unchanged so legacy callers (3-arg ctor, tests)
+     * continue to behave like the pre-scrubber adapter. The cost of the
+     * regex scan on a normal reply with no generated URLs is one
+     * Matcher.find() that returns false, negligible.
+     */
+    // Package-private so tests can call directly without driving the full
+    // streaming pipeline. Production callers are processStream and
+    // processStreamAsText, both internal.
+    String scrubAndSendAttachments(String targetId, String content) {
+        if (content == null || content.isEmpty()
+                || generatedFileScrubber == null
+                || mediaUploader == null
+                || channelEntity == null
+                || channelEntity.getId() == null) {
+            return content;
+        }
+        GeneratedFileScrubber.ScrubResult scrubbed = generatedFileScrubber.scrub(content);
+        Long channelId = channelEntity.getId();
+        for (GeneratedFileScrubber.AttachmentHit hit : scrubbed.attachments()) {
+            uploadAndSendAttachment(targetId, channelId,
+                    new MediaSource.Bytes(hit.bytes()),
+                    hit.fileName(),
+                    hit.mediaType(),
+                    hit.mimeType(),
+                    null);
+        }
+        return scrubbed.rewrittenText();
     }
 
     /** Resolve the best id to receive a streaming card — prefer reply token, then chat, then sender. */
@@ -2255,10 +2305,12 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
      * downgrade note as a follow-up text bubble so users understand
      * why a bubble isn't native.
      */
-    private void uploadAndSendAttachment(String targetId, Long channelId,
-                                          MediaSource source, String fileName,
-                                          String mediaType, String contentType,
-                                          Integer durationMillis) {
+    // Package-private + non-final so tests can override and capture upload
+    // attempts without standing up a real Feishu HTTP client.
+    void uploadAndSendAttachment(String targetId, Long channelId,
+                                  MediaSource source, String fileName,
+                                  String mediaType, String contentType,
+                                  Integer durationMillis) {
         try {
             MediaUploadResult result = mediaUploader.upload(new MediaUploadRequest(
                     channelId, source, fileName, mediaType, contentType, durationMillis));
