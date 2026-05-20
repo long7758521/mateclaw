@@ -137,10 +137,28 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
     /** Interactive-card dispatcher (approval cards etc.). Nullable for legacy callers / tests. */
     private final vip.mate.channel.feishu.cards.FeishuCardDispatcher cardDispatcher;
 
+    /**
+     * Per-channel SDK {@code Client} factory — drives inbound resource
+     * downloads via {@code client.im().v1().messageResource().get(...)}
+     * instead of the legacy hand-rolled {@code HttpClient} path. Nullable
+     * for legacy callers / tests, in which case the adapter falls back
+     * to the raw HTTP path (still works, just bypasses retries / token
+     * refresh / domain switching that the SDK handles).
+     */
+    private final FeishuClientFactory clientFactory;
+
+    /**
+     * Process-local cache that exposes downloaded inbound media via
+     * {@code /api/v1/files/generated/{id}} so the conversation memory
+     * and admin UI can render the file without holding a tenant token.
+     * Nullable for legacy callers / tests.
+     */
+    private final vip.mate.tool.document.GeneratedFileCache generatedFileCache;
+
     public FeishuChannelAdapter(ChannelEntity channelEntity,
                                 ChannelMessageRouter messageRouter,
                                 ObjectMapper objectMapper) {
-        this(channelEntity, messageRouter, objectMapper, null, null, null, null);
+        this(channelEntity, messageRouter, objectMapper, null, null, null, null, null, null);
     }
 
     public FeishuChannelAdapter(ChannelEntity channelEntity,
@@ -148,7 +166,8 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                                 ObjectMapper objectMapper,
                                 FeishuMediaUploader mediaUploader,
                                 GeneratedFileScrubber generatedFileScrubber) {
-        this(channelEntity, messageRouter, objectMapper, mediaUploader, generatedFileScrubber, null, null);
+        this(channelEntity, messageRouter, objectMapper, mediaUploader, generatedFileScrubber,
+                null, null, null, null);
     }
 
     public FeishuChannelAdapter(ChannelEntity channelEntity,
@@ -158,7 +177,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                                 GeneratedFileScrubber generatedFileScrubber,
                                 FeishuStreamingCardManager streamingCardManager) {
         this(channelEntity, messageRouter, objectMapper, mediaUploader,
-                generatedFileScrubber, streamingCardManager, null);
+                generatedFileScrubber, streamingCardManager, null, null, null);
     }
 
     public FeishuChannelAdapter(ChannelEntity channelEntity,
@@ -168,11 +187,26 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                                 GeneratedFileScrubber generatedFileScrubber,
                                 FeishuStreamingCardManager streamingCardManager,
                                 vip.mate.channel.feishu.cards.FeishuCardDispatcher cardDispatcher) {
+        this(channelEntity, messageRouter, objectMapper, mediaUploader,
+                generatedFileScrubber, streamingCardManager, cardDispatcher, null, null);
+    }
+
+    public FeishuChannelAdapter(ChannelEntity channelEntity,
+                                ChannelMessageRouter messageRouter,
+                                ObjectMapper objectMapper,
+                                FeishuMediaUploader mediaUploader,
+                                GeneratedFileScrubber generatedFileScrubber,
+                                FeishuStreamingCardManager streamingCardManager,
+                                vip.mate.channel.feishu.cards.FeishuCardDispatcher cardDispatcher,
+                                FeishuClientFactory clientFactory,
+                                vip.mate.tool.document.GeneratedFileCache generatedFileCache) {
         super(channelEntity, messageRouter, objectMapper);
         this.mediaUploader = mediaUploader;
         this.generatedFileScrubber = generatedFileScrubber;
         this.streamingCardManager = streamingCardManager;
         this.cardDispatcher = cardDispatcher;
+        this.clientFactory = clientFactory;
+        this.generatedFileCache = generatedFileCache;
         // Feishu WebSocket reconnect: 2s→4s→8s→16s→30s, infinite retry
         this.backoff = new ExponentialBackoff(2000, 30000, 2.0, -1);
     }
@@ -1276,11 +1310,9 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                         // image. Default-on for images (separate from the
                         // file/audio/video gate) so vision works out of the
                         // box; admins can opt out with feishu_image_download_enabled=false.
-                        String localPath = maybeDownloadImage(messageId, imageKey);
+                        DownloadedResource dl = maybeDownloadImage(messageId, imageKey);
                         MessageContentPart part = MessageContentPart.image(imageKey, null);
-                        if (localPath != null) {
-                            part.setPath(localPath);
-                        }
+                        applyDownload(part, dl);
                         parts.add(part);
                     }
                     yield "[图片]";
@@ -1289,9 +1321,9 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     String fileKey = (String) contentObj.get("file_key");
                     String fileName = (String) contentObj.get("file_name");
                     if (fileKey != null) {
-                        String localPath = maybeDownloadResource(messageId, fileKey, "file", fileName);
+                        DownloadedResource dl = maybeDownloadResource(messageId, fileKey, "file", fileName);
                         MessageContentPart part = MessageContentPart.file(fileKey, fileName, null);
-                        if (localPath != null) part.setPath(localPath);
+                        applyDownload(part, dl);
                         parts.add(part);
                     }
                     yield "[文件: " + (fileName != null ? fileName : "") + "]";
@@ -1299,9 +1331,9 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                 case "audio" -> {
                     String fileKey = (String) contentObj.get("file_key");
                     if (fileKey != null) {
-                        String localPath = maybeDownloadResource(messageId, fileKey, "file", null);
+                        DownloadedResource dl = maybeDownloadResource(messageId, fileKey, "file", null);
                         MessageContentPart part = MessageContentPart.audio(fileKey, null);
-                        if (localPath != null) part.setPath(localPath);
+                        applyDownload(part, dl);
                         parts.add(part);
                     }
                     yield "[音频]";
@@ -1310,9 +1342,9 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     String fileKey = (String) contentObj.get("file_key");
                     String fileName = (String) contentObj.get("file_name");
                     if (fileKey != null) {
-                        String localPath = maybeDownloadResource(messageId, fileKey, "file", fileName);
+                        DownloadedResource dl = maybeDownloadResource(messageId, fileKey, "file", fileName);
                         MessageContentPart part = MessageContentPart.video(fileKey, fileName);
-                        if (localPath != null) part.setPath(localPath);
+                        applyDownload(part, dl);
                         parts.add(part);
                     }
                     yield "[视频]";
@@ -1388,7 +1420,8 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                 (List<List<Map<String, Object>>>) localeBranch.get("content");
         if (paragraphs == null) return text.toString().trim();
 
-        boolean mediaDownload = getConfigBoolean("media_download_enabled", false);
+        // Same default-on behaviour as the standalone file/audio/video branch — see maybeDownloadResource.
+        boolean mediaDownload = getConfigBoolean("media_download_enabled", true);
 
         for (int i = 0; i < paragraphs.size(); i++) {
             List<Map<String, Object>> paragraph = paragraphs.get(i);
@@ -1432,9 +1465,9 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                         if (imageKey != null) {
                             // Same reasoning as the standalone image case: vision
                             // pipelines need bytes; image_key alone is opaque.
-                            String localPath = maybeDownloadImage(messageId, imageKey);
+                            DownloadedResource dl = maybeDownloadImage(messageId, imageKey);
                             MessageContentPart imgPart = MessageContentPart.image(imageKey, null);
-                            if (localPath != null) imgPart.setPath(localPath);
+                            applyDownload(imgPart, dl);
                             parts.add(imgPart);
                             text.append("[图片]");
                         }
@@ -1442,9 +1475,11 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     case "media" -> {
                         String fileKey = (String) element.get("file_key");
                         if (fileKey != null) {
-                            String localPath = mediaDownload ? maybeDownloadResource(messageId, fileKey, "file", null) : null;
+                            DownloadedResource dl = mediaDownload
+                                    ? maybeDownloadResource(messageId, fileKey, "file", null)
+                                    : null;
                             MessageContentPart mediaPart = MessageContentPart.file(fileKey, null, null);
-                            if (localPath != null) mediaPart.setPath(localPath);
+                            applyDownload(mediaPart, dl);
                             parts.add(mediaPart);
                             text.append("[媒体]");
                         }
@@ -1469,13 +1504,44 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         return result.isEmpty() ? null : result;
     }
 
-    // ==================== 媒体文件下载 ====================
+    // ==================== Inbound media download ====================
 
     /**
-     * 如果 media_download_enabled 则下载资源，否则返回 null
+     * Result of a successful inbound-resource download.
+     *
+     * @param path        absolute path on disk under
+     *                    {@code ~/.mateclaw/media/feishu/} — fed to
+     *                    {@link MessageContentPart#setPath(String)} so
+     *                    vision / file-reading tools can consume bytes
+     * @param fileUrl     {@code /api/v1/files/generated/{id}} URL backed
+     *                    by {@link vip.mate.tool.document.GeneratedFileCache}
+     *                    (10-min TTL) so the admin UI and conversation
+     *                    memory can render the file without a tenant
+     *                    token; {@code null} when the cache wasn't wired
+     *                    in (e.g. legacy tests)
+     * @param fileName    server-side filename (extension inferred from
+     *                    content-type, falls back to {@code fileNameHint}
+     *                    or the SDK-returned name)
+     * @param contentType MIME type from the download response headers
      */
-    private String maybeDownloadResource(String messageId, String fileKey, String type, String fileNameHint) {
-        if (!getConfigBoolean("media_download_enabled", false)) {
+    // Package-private for unit tests — pin the field copy contract.
+    record DownloadedResource(String path, String fileUrl,
+                              String fileName, String contentType) {}
+
+    /**
+     * Download a {@code file} / {@code audio} / {@code video} inbound
+     * resource, but only when the per-channel
+     * {@code media_download_enabled} flag is on. Default is now <b>true</b>
+     * so a user uploading a file to the bot lands as a real file the
+     * agent can read — set it to {@code false} on the channel config to
+     * opt out (e.g. tighter privacy, no disk usage).
+     *
+     * <p>Mirrors the WeCom / DingTalk pattern: text-only adapters dropping
+     * file bytes was the "did you receive my doc?" gap reported in
+     * production.
+     */
+    private DownloadedResource maybeDownloadResource(String messageId, String fileKey, String type, String fileNameHint) {
+        if (!getConfigBoolean("media_download_enabled", true)) {
             return null;
         }
         return downloadResource(messageId, fileKey, type, fileNameHint);
@@ -1490,7 +1556,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
      * downloads (e.g. tighter privacy, no disk usage) can set
      * {@code feishu_image_download_enabled=false} on the channel config.
      */
-    private String maybeDownloadImage(String messageId, String imageKey) {
+    private DownloadedResource maybeDownloadImage(String messageId, String imageKey) {
         if (!getConfigBoolean("feishu_image_download_enabled", true)) {
             return null;
         }
@@ -1498,15 +1564,87 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
     }
 
     /**
-     * 下载飞书消息资源（图片/文件）到本地
-     *
-     * @param messageId    消息 ID
-     * @param fileKey      资源 key（image_key 或 file_key）
-     * @param type         资源类型："image" 或 "file"
-     * @param fileNameHint 文件名提示（可选）
-     * @return 本地文件路径，失败返回 null
+     * Copy a {@link DownloadedResource}'s fields onto a
+     * {@link MessageContentPart}. {@code null} input is a no-op so the
+     * caller can keep the part as a bare {@code file_key} placeholder
+     * when download was disabled / failed.
      */
-    private String downloadResource(String messageId, String fileKey, String type, String fileNameHint) {
+    // Package-private for unit tests.
+    static void applyDownload(MessageContentPart part, DownloadedResource dl) {
+        if (dl == null || part == null) return;
+        if (dl.path() != null) part.setPath(dl.path());
+        if (dl.fileUrl() != null) part.setFileUrl(dl.fileUrl());
+        if (dl.fileName() != null && (part.getFileName() == null || part.getFileName().isBlank())) {
+            part.setFileName(dl.fileName());
+        }
+        if (dl.contentType() != null) part.setContentType(dl.contentType());
+    }
+
+    /**
+     * Pull an inbound resource (image / file / audio / video) from
+     * Feishu and persist it both to disk and (best-effort) to the
+     * {@link vip.mate.tool.document.GeneratedFileCache}.
+     *
+     * <p>Implementation prefers the official {@code oapi-sdk}
+     * ({@code client.im().v1().messageResource().get(...)}) when a
+     * {@link FeishuClientFactory} was wired in — gets token refresh,
+     * domain switching (feishu / lark), retries, and the same
+     * {@code Authorization} contract the rest of the SDK uses for free.
+     * Falls back to the legacy hand-rolled {@code HttpClient} path
+     * when no factory is available (3-arg legacy ctor / unit tests).
+     *
+     * @param messageId    Feishu message id ({@code om_…}) — required
+     *                     by the resource endpoint to scope the file
+     * @param fileKey      resource key ({@code img_…} for images,
+     *                     {@code file_…} for everything else)
+     * @param type         SDK type discriminator: {@code "image"} for
+     *                     images, {@code "file"} for file/audio/video
+     * @param fileNameHint optional original filename (used for
+     *                     extension inference when the response has no
+     *                     useful Content-Type)
+     * @return a {@link DownloadedResource} on success, {@code null} on
+     *         any failure (logged at debug) — caller treats {@code null}
+     *         as "skip, just pass the opaque key through"
+     */
+    private DownloadedResource downloadResource(String messageId, String fileKey, String type, String fileNameHint) {
+        // ---- Prefer SDK path: token refresh, retries, domain handled by the SDK
+        if (clientFactory != null && channelEntity != null && channelEntity.getId() != null) {
+            try {
+                com.lark.oapi.Client client = clientFactory.client(channelEntity.getId());
+                com.lark.oapi.service.im.v1.model.GetMessageResourceReq req =
+                        com.lark.oapi.service.im.v1.model.GetMessageResourceReq.newBuilder()
+                                .messageId(messageId)
+                                .fileKey(fileKey)
+                                .type(type)
+                                .build();
+                com.lark.oapi.service.im.v1.model.GetMessageResourceResp resp =
+                        client.im().v1().messageResource().get(req);
+                if (!resp.success() || resp.getData() == null) {
+                    log.debug("[feishu] SDK resource.get failed: code={}, msg={}",
+                            resp.getCode(), resp.getMsg());
+                    return null;
+                }
+                byte[] bytes = resp.getData().toByteArray();
+                // SDK exposes Content-Disposition's filename via getFileName();
+                // prefer it over the hint when present.
+                String sdkFileName = resp.getFileName();
+                String preferredHint = (sdkFileName != null && !sdkFileName.isBlank())
+                        ? sdkFileName : fileNameHint;
+                // No Content-Type accessor on GetMessageResourceResp — infer
+                // from filename extension (good enough for cache MIME and
+                // for vision pipelines that key on extension).
+                String contentType = inferMimeFromName(preferredHint);
+                return persistAndCache(messageId, fileKey, bytes, preferredHint, contentType);
+            } catch (Exception e) {
+                log.debug("[feishu] SDK resource.get threw, falling back to raw HTTP: {}", e.getMessage());
+                // Fall through to raw HTTP — keeps the inbound path resilient
+                // when the SDK is temporarily unhappy (e.g. invalid req shape
+                // on a new event type the SDK doesn't yet model).
+            }
+        }
+
+        // ---- Legacy fallback: hand-rolled HTTP. Kept so the 3-arg ctor
+        // and unit tests that don't wire a factory still get bytes.
         try {
             ensureTokenValid();
             String apiBase = getApiBaseUrl();
@@ -1532,38 +1670,108 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     log.debug("[feishu] Download resource failed: status={}", response.statusCode());
                     return null;
                 }
-
-                // 构建目标目录
-                Path mediaDir = Path.of(System.getProperty("user.home"), ".mateclaw", "media", "feishu");
-                Files.createDirectories(mediaDir);
-
-                // 安全文件名
-                String safeKey = fileKey.replaceAll("[^a-zA-Z0-9_]", "");
-                if (safeKey.isEmpty()) safeKey = "file";
-
-                // 推断扩展名
-                String ext = "bin";
-                String contentType = response.headers().firstValue("Content-Type").orElse("");
-                if (contentType.contains("jpeg") || contentType.contains("jpg")) ext = "jpg";
-                else if (contentType.contains("png")) ext = "png";
-                else if (contentType.contains("gif")) ext = "gif";
-                else if (contentType.contains("webp")) ext = "webp";
-                else if (contentType.contains("pdf")) ext = "pdf";
-                else if (fileNameHint != null && fileNameHint.contains(".")) {
-                    ext = fileNameHint.substring(fileNameHint.lastIndexOf('.') + 1);
-                }
-
-                Path filePath = mediaDir.resolve(messageId + "_" + safeKey + "." + ext);
-                Files.copy(is, filePath, StandardCopyOption.REPLACE_EXISTING);
-
-                log.debug("[feishu] Downloaded resource to: {}", filePath);
-                return filePath.toAbsolutePath().toString();
+                String contentType = response.headers().firstValue("Content-Type")
+                        .orElse(inferMimeFromName(fileNameHint));
+                byte[] bytes = is.readAllBytes();
+                return persistAndCache(messageId, fileKey, bytes, fileNameHint, contentType);
             }
 
         } catch (Exception e) {
             log.debug("[feishu] Download resource failed: {}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Write {@code bytes} to {@code ~/.mateclaw/media/feishu/} and,
+     * if {@link #generatedFileCache} is wired, also push them into the
+     * cache so the UI gets a {@code /api/v1/files/generated/{id}} URL.
+     * Disk persist is always attempted; cache push is best-effort.
+     */
+    private DownloadedResource persistAndCache(String messageId, String fileKey,
+                                               byte[] bytes, String fileNameHint,
+                                               String contentType) throws java.io.IOException {
+        Path mediaDir = Path.of(System.getProperty("user.home"), ".mateclaw", "media", "feishu");
+        Files.createDirectories(mediaDir);
+
+        String safeKey = fileKey.replaceAll("[^a-zA-Z0-9_]", "");
+        if (safeKey.isEmpty()) safeKey = "file";
+
+        String ext = extensionFor(contentType, fileNameHint);
+        String resolvedFileName = (fileNameHint != null && !fileNameHint.isBlank())
+                ? fileNameHint
+                : (safeKey + "." + ext);
+
+        Path filePath = mediaDir.resolve(messageId + "_" + safeKey + "." + ext);
+        Files.write(filePath, bytes);
+        log.debug("[feishu] Downloaded resource to: {} ({} bytes, {})",
+                filePath, bytes.length, contentType);
+
+        // Best-effort cache push so the UI / agent can reference the file
+        // via a tokenless URL. Failure here doesn't kill the inbound path —
+        // the local path on its own is still useful for vision tools.
+        String fileUrl = null;
+        if (generatedFileCache != null) {
+            try {
+                String id = generatedFileCache.put(bytes, resolvedFileName, contentType);
+                fileUrl = "/api/v1/files/generated/" + id;
+            } catch (Exception cacheEx) {
+                log.debug("[feishu] cache put failed: {}", cacheEx.getMessage());
+            }
+        }
+        return new DownloadedResource(filePath.toAbsolutePath().toString(),
+                fileUrl, resolvedFileName, contentType);
+    }
+
+    /** Map content-type / file-name hint to a short extension for the on-disk filename. */
+    // Package-private for unit tests.
+    static String extensionFor(String contentType, String fileNameHint) {
+        if (contentType != null) {
+            String ct = contentType.toLowerCase(java.util.Locale.ROOT);
+            if (ct.contains("jpeg") || ct.contains("jpg")) return "jpg";
+            if (ct.contains("png")) return "png";
+            if (ct.contains("gif")) return "gif";
+            if (ct.contains("webp")) return "webp";
+            if (ct.contains("pdf")) return "pdf";
+            if (ct.contains("opus")) return "opus";
+            if (ct.contains("mpeg") || ct.contains("mp3")) return "mp3";
+            if (ct.contains("mp4")) return "mp4";
+            if (ct.contains("wordprocessing") || ct.contains("msword")) return "docx";
+            if (ct.contains("spreadsheet") || ct.contains("excel")) return "xlsx";
+            if (ct.contains("presentation") || ct.contains("powerpoint")) return "pptx";
+        }
+        if (fileNameHint != null && fileNameHint.contains(".")) {
+            String hint = fileNameHint.substring(fileNameHint.lastIndexOf('.') + 1)
+                    .toLowerCase(java.util.Locale.ROOT);
+            if (!hint.isBlank()) return hint;
+        }
+        return "bin";
+    }
+
+    /**
+     * Best-effort MIME guess from a filename — the SDK download response
+     * doesn't expose Content-Type, so we fall back to the extension. Good
+     * enough for the cache (used for the {@code Content-Type} header the
+     * UI sets when re-serving) and for vision providers (most key on
+     * extension anyway).
+     */
+    // Package-private for unit tests.
+    static String inferMimeFromName(String fileName) {
+        if (fileName == null) return "application/octet-stream";
+        String lower = fileName.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".pdf")) return "application/pdf";
+        if (lower.endsWith(".opus")) return "audio/opus";
+        if (lower.endsWith(".mp3")) return "audio/mpeg";
+        if (lower.endsWith(".mp4")) return "video/mp4";
+        if (lower.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        if (lower.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        if (lower.endsWith(".pptx")) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
+        return "application/octet-stream";
     }
 
     // ==================== 消息发送 ====================
