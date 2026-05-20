@@ -42,6 +42,22 @@ public class ConversationController {
     }
 
     /**
+     * 分页查询会话列表（用于会话管理页）。
+     * <p>会话管理页可能跨多个 IM 渠道，单页全量返回会拖慢首屏。
+     */
+    @Operation(summary = "分页查询会话列表")
+    @GetMapping("/page")
+    public R<com.baomidou.mybatisplus.core.metadata.IPage<ConversationVO>> page(
+            Authentication auth,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String keyword) {
+        String username = auth != null ? auth.getName() : "anonymous";
+        return R.ok(conversationService.pageConversations(username, workspaceId, page, size, keyword));
+    }
+
+    /**
      * 获取指定会话的消息历史（支持分页）。
      * <p>
      * 不传 limit 时返回全部消息（向后兼容）。

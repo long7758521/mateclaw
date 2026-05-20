@@ -148,6 +148,76 @@ public class ConversationService {
     }
 
     /**
+     * Paginated variant used by the Sessions admin page.
+     *
+     * <p>Mirrors {@link #listConversations(String, Long)}'s filtering (current
+     * user + system rows, top-level only, optional workspace) and adds a
+     * {@code keyword} match against title / conversationId. The keyword is
+     * case-insensitive and treated as a substring.
+     *
+     * <p>会话管理页使用的分页查询。在 {@link #listConversations(String, Long)}
+     * 的基础上增加 title / conversationId 模糊匹配。
+     */
+    public com.baomidou.mybatisplus.core.metadata.IPage<ConversationVO> pageConversations(
+            String username, Long workspaceId, int page, int size, String keyword) {
+        if (page < 1) page = 1;
+        if (size < 1 || size > 200) size = 20;
+
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<ConversationEntity> pager =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(page, size);
+
+        LambdaQueryWrapper<ConversationEntity> wrapper = new LambdaQueryWrapper<ConversationEntity>()
+                .in(ConversationEntity::getUsername, username, SYSTEM_USER)
+                .isNull(ConversationEntity::getParentConversationId)
+                .orderByDesc(ConversationEntity::getPinned)
+                .orderByDesc(ConversationEntity::getLastActiveTime);
+        if (workspaceId != null) {
+            wrapper.eq(ConversationEntity::getWorkspaceId, workspaceId);
+        }
+        if (keyword != null && !keyword.isBlank()) {
+            String kw = keyword.trim();
+            wrapper.and(w -> w
+                    .like(ConversationEntity::getTitle, kw)
+                    .or()
+                    .like(ConversationEntity::getConversationId, kw));
+        }
+
+        com.baomidou.mybatisplus.core.metadata.IPage<ConversationEntity> entityPage =
+                conversationMapper.selectPage(pager, wrapper);
+
+        List<ConversationEntity> entities = entityPage.getRecords();
+        Map<Long, AgentEntity> agentMap;
+        if (entities.isEmpty()) {
+            agentMap = Map.of();
+        } else {
+            List<Long> agentIds = entities.stream()
+                    .filter(e -> e.getAgentId() != null)
+                    .map(ConversationEntity::getAgentId)
+                    .distinct()
+                    .collect(Collectors.toList());
+            agentMap = agentIds.isEmpty()
+                    ? Map.of()
+                    : agentMapper.selectBatchIds(agentIds).stream()
+                            .collect(Collectors.toMap(AgentEntity::getId, a -> a));
+        }
+
+        com.baomidou.mybatisplus.core.metadata.IPage<ConversationVO> voPage =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<ConversationVO>(
+                        entityPage.getCurrent(), entityPage.getSize(), entityPage.getTotal());
+        voPage.setRecords(entities.stream()
+                .map(entity -> {
+                    AgentEntity agent = entity.getAgentId() != null
+                            ? agentMap.get(entity.getAgentId())
+                            : null;
+                    String agentName = agent != null ? agent.getName() : null;
+                    String agentIcon = agent != null ? agent.getIcon() : null;
+                    return ConversationVO.from(entity, agentName, agentIcon);
+                })
+                .collect(Collectors.toList()));
+        return voPage;
+    }
+
+    /**
      * Get-or-create conversation (backward-compat overload, defaults to workspace 1).
      *
      * <p>获取或创建会话（向后兼容，默认 workspace 1）。

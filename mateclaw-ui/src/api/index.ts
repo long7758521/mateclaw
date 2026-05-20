@@ -154,6 +154,13 @@ export const chatApi = {
 // ==================== Conversation ====================
 export const conversationApi = {
   list: () => http.get('/conversations'),
+  /**
+   * Paginated list used by the Sessions admin page. Keyword matches title
+   * or conversationId server-side; ChatConsole's left panel still uses the
+   * non-paginated list() because it shows a per-agent rolling history.
+   */
+  page: (params: { page?: number; size?: number; keyword?: string }) =>
+    http.get('/conversations/page', { params }),
   listMessages: (conversationId: string, params?: { beforeId?: number; limit?: number }) =>
     http.get(`/conversations/${conversationId}/messages`, { params }),
   getStatus: (conversationId: string) =>

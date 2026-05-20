@@ -1736,6 +1736,7 @@ export default {
   sessions: {
     title: 'Sessions',
     desc: 'View and manage all conversation sessions',
+    back: 'Back',
     search: 'Search sessions...',
     columns: {
       session: 'Session',
@@ -1752,6 +1753,9 @@ export default {
       closed: 'Closed',
     },
     empty: 'No sessions found',
+    emptyHeading: 'No sessions yet',
+    emptyDesc: 'Head over to Chat to start a conversation — every session you have will show up here.',
+    emptyCta: 'Start chatting',
     loadFailed: 'Failed to load sessions',
     deleteConfirm: 'Are you sure you want to delete this session?',
     deleteTitle: 'Confirm Delete',

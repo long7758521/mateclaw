@@ -1628,6 +1628,7 @@ export default {
   sessions: {
     title: '会话管理',
     desc: '查看和管理所有会话',
+    back: '返回',
     search: '搜索会话...',
     columns: {
       session: '会话',
@@ -1644,6 +1645,9 @@ export default {
       closed: '已关闭',
     },
     empty: '暂无会话',
+    emptyHeading: '还没有任何会话',
+    emptyDesc: '去对话页开始一次交流，所有的会话都会在这里汇总',
+    emptyCta: '开始对话',
     loadFailed: '加载会话列表失败',
     deleteConfirm: '确定要删除这个会话吗？',
     deleteTitle: '确认删除',
