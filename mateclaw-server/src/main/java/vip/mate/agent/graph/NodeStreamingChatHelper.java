@@ -333,11 +333,22 @@ public class NodeStreamingChatHelper {
      */
     private static final int CONTENT_REPEAT_CHECK_INTERVAL = 200;
 
-    private static final int MAX_RETRIES = 10;
+    /**
+     * Maximum retry attempts for SERVER_ERROR / transient network failures.
+     * Total LLM calls per turn = MAX_RETRIES + 1 (attempt 0 is the initial,
+     * attempts 1..MAX_RETRIES are the retries). Bumped from 5 to 10 in
+     * commit 1dd99b68 so sustained wiki batch load can ride out provider
+     * flaps without surfacing the error.
+     *
+     * <p>Package-private so {@code LaneDPerformanceFixesTest} can stay in
+     * sync without a magic number — when this value changes again, the
+     * test follows automatically.
+     */
+    static final int MAX_RETRIES = 10;
     // RATE_LIMIT: fail fast to failover chain — staying on the same
     // provider during a rate-limit window wastes time without recovery.
     // SERVER_ERROR keeps MAX_RETRIES (upstream flaps often self-heal).
-    private static final int MAX_RETRIES_RATE_LIMIT = 2;
+    static final int MAX_RETRIES_RATE_LIMIT = 2;
     private static final long BACKOFF_BASE_MS = 3000;
     private static final long BACKOFF_CAP_MS = 60_000;
 
