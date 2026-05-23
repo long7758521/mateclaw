@@ -43,9 +43,12 @@
                         </svg>
                       </div>
                       <div>
-                        <div class="tool-name">{{ tool.name }}</div>
+                        <div class="tool-name">{{ primaryToolName(tool) }}</div>
                         <div class="tool-desc">{{ tool.description }}</div>
-                        <code class="tool-bean">{{ tool.beanName }}</code>
+                        <div class="tool-meta-line">
+                          <code v-if="tool.name && tool.name !== primaryToolName(tool)" class="tool-bean">{{ tool.name }}</code>
+                          <code v-if="tool.beanName" class="tool-bean">{{ tool.beanName }}</code>
+                        </div>
                       </div>
                     </div>
                   </td>
@@ -158,6 +161,11 @@ type Tier = 'core' | 'extension'
 
 function effectiveTier(tool: Tool): Tier {
   return tool.disclosureTier === 'extension' ? 'extension' : 'core'
+}
+
+function primaryToolName(tool: Tool): string {
+  const runtimeName = Array.isArray(tool.runtimeNames) ? tool.runtimeNames[0] : ''
+  return runtimeName || tool.name
 }
 
 // Only builtin / channel atomic tools are tiered on the row itself; MCP / ACP /
@@ -285,8 +293,9 @@ async function toggleTool(tool: Tool) {
 .tool-icon-wrap { width: 36px; height: 36px; background: linear-gradient(135deg, rgba(217,109,87,0.12), rgba(24,74,69,0.08)); border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--mc-text-secondary); }
 .tool-name { font-weight: 500; color: var(--mc-text-primary); }
 .tool-desc { font-size: 12px; color: var(--mc-text-tertiary); margin-top: 1px; }
+.tool-meta-line { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .bean-name { background: var(--mc-bg-sunken); padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--mc-text-primary); }
-.tool-bean { display: inline-block; margin-top: 4px; padding: 1px 6px; background: var(--mc-bg-sunken); border-radius: 4px; font-size: 11px; color: var(--mc-text-tertiary); font-family: var(--mc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.tool-bean { display: inline-block; padding: 1px 6px; background: var(--mc-bg-sunken); border-radius: 4px; font-size: 11px; color: var(--mc-text-tertiary); font-family: var(--mc-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
 .type-badge { padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight: 500; }
 .type-builtin { background: var(--mc-primary-bg); color: var(--mc-primary); }
 .type-mcp { background: var(--mc-primary-bg); color: var(--mc-primary-hover); }

@@ -503,6 +503,8 @@ export interface Tool {
   description?: string
   beanName?: string
   toolType: string
+  /** Runtime @Tool function names shown to the model, when resolvable. */
+  runtimeNames?: string[]
   icon?: string
   mcpEndpoint?: string
   paramsSchema?: string

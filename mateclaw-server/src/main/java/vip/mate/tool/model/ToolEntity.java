@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.*;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 工具实体
@@ -67,6 +68,14 @@ public class ToolEntity {
      * {@code ToolDisclosureService}.
      */
     private String disclosureTier;
+
+    /**
+     * Runtime {@code @Tool} function names exposed by this row's bean/class
+     * aliases. Not persisted; populated for admin UI so tier changes can be
+     * correlated with the names the model actually sees.
+     */
+    @TableField(exist = false)
+    private List<String> runtimeNames;
 
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
