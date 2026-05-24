@@ -458,7 +458,18 @@ public class ChatStreamTracker {
         RunState state = runs.get(conversationId);
         if (state != null && state.done) {
             stopHeartbeat(conversationId);
-            runs.put(conversationId, new RunState(conversationId));
+            RunState nextState = new RunState(conversationId);
+            int carried = 0;
+            QueuedInput queued;
+            while ((queued = state.messageQueue.poll()) != null) {
+                nextState.messageQueue.offer(queued);
+                carried++;
+            }
+            runs.put(conversationId, nextState);
+            if (carried > 0) {
+                log.info("[ChatStreamTracker] Carried {} queued message(s) into next run: {}",
+                        carried, conversationId);
+            }
         } else if (state != null) {
             // Reuse path: when complete() early-returns due to activeFluxCount > 0
             // (approval replay / interrupt / any leaked flux increment), the RunState
