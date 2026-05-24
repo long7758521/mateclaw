@@ -83,6 +83,36 @@ public class ReasoningNode implements NodeAction {
     private static final int DASHSCOPE_MAX_OUTPUT_TOKENS = 8192;
 
     /**
+     * Max times to re-prompt the model when it returns a completely empty turn
+     * (no tool call, no content, no thinking) before accepting termination.
+     * A blank turn is otherwise treated as a final answer and ends the run; on
+     * long multi-step tasks that surfaces as the agent quitting mid-way.
+     */
+    private static final int MAX_EMPTY_COMPLETION_RETRIES = 2;
+
+    /** Continuation nudge appended to the prompt when the model returns an empty turn. */
+    private static final String EMPTY_COMPLETION_NUDGE =
+            "Your previous turn was empty. If the task is not yet complete, continue now "
+            + "with the next concrete step — call a tool or write the next part. If every "
+            + "required step is already done, output the final answer to the user now.";
+
+    /**
+     * A turn carrying no tool call, no content, and no thinking is not a usable
+     * answer — it would route to the final-answer branch as an empty string and
+     * terminate the run. Fatal / prompt-too-long / partial results are handled by
+     * their own branches and must not be misread as "empty".
+     */
+    static boolean isEmptyCompletion(NodeStreamingChatHelper.StreamResult result) {
+        if (result == null || result.hasToolCalls() || result.hasFatalError()
+                || result.isPromptTooLong() || result.partial()) {
+            return false;
+        }
+        boolean noContent = result.text() == null || result.text().isBlank();
+        boolean noThinking = result.thinking() == null || result.thinking().isBlank();
+        return noContent && noThinking;
+    }
+
+    /**
      * Tool-use enforcement clause appended to every ReasoningNode
      * system prompt. Treats narration ("I will now …") as a protocol violation
      * to prevent the recurring failure mode where a model says it will call a
@@ -518,6 +548,28 @@ public class ReasoningNode implements NodeAction {
                 } else {
                     log.warn("[ReasoningNode] Compaction did not reduce messages, cannot retry");
                 }
+            }
+
+            // Empty-completion guard: a turn with no tool call, no content, and
+            // no thinking is not a real answer. Under heavy message-window
+            // trimming on long multi-step tasks the model occasionally emits a
+            // blank turn; the final-answer branch would then treat it as "done"
+            // (finalAnswer="") and end the run prematurely (observed: a 10-item
+            // research task stopping at item 2). Re-prompt it to continue —
+            // bounded, so a model that genuinely has nothing left still
+            // terminates cleanly through the normal empty-answer path below.
+            int emptyRetries = 0;
+            while (emptyRetries < MAX_EMPTY_COMPLETION_RETRIES && isEmptyCompletion(result)) {
+                emptyRetries++;
+                log.warn("[ReasoningNode] Empty LLM completion (no tool call / content / thinking); "
+                                + "nudging to continue (retry {}/{}), conv={}",
+                        emptyRetries, MAX_EMPTY_COMPLETION_RETRIES, conversationId);
+                List<Message> nudgedMessages = new ArrayList<>(promptMessages);
+                nudgedMessages.add(new UserMessage(EMPTY_COMPLETION_NUDGE));
+                Prompt nudgePrompt = new Prompt(nudgedMessages, options);
+                nextLlmCallCount++;
+                result = streamingHelper.streamCall(
+                        chatModel, nudgePrompt, conversationId, "reasoning_empty_retry");
             }
         } catch (CancellationException ce) {
             // "调用已发出但尚未产出内容时用户停止" — streamHelper 抛 CancellationException。
