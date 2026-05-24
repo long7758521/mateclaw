@@ -140,15 +140,26 @@ public class ReasoningNode implements NodeAction {
             + "  请重新调用同一工具但**缩小内容**，或拆成多次顺序调用，**不要改成纯文字回答**。\n"
             + "- 只在确实没有合适工具，或所有工具步骤都已完成、可以最终回答用户时，\n"
             + "  才输出无 tool_call 的纯文字回答。\n\n"
-            + "## 进度跟踪（多步任务必读）\n\n"
-            + "- 对于包含 ≥3 个独立子步骤的任务（逐项调研、分节起草、批量生成等），\n"
-            + "  你**应当**使用 `progress_update` 工具维护进度账本：\n"
-            + "  1. 任务起手时为每个子步骤注册一条 `pending` 条目；\n"
-            + "  2. 开始执行某条前切到 `in_progress`；\n"
-            + "  3. 完成后立即切到 `done`；遇到阻塞切到 `blocked` 并写明原因。\n"
-            + "- 系统会在你的每一次推理前注入一份**当前进度快照**（标题 \"当前任务进度\"），\n"
-            + "  请把它视为权威的\"已完成清单\"，**不要重复执行已经 done 的步骤**。\n"
-            + "- 单一问题（无须拆解的短任务）不需要使用本工具；用错不会报错，但会浪费一次调用。\n";
+            + "## 进度跟踪（多步任务强制规则，不可绕过）\n\n"
+            + "**触发条件**：用户的任务包含 ≥3 个可枚举子目标 — 比如\n"
+            + "\"调研 10 个模型\"、\"逐节起草报告\"、\"批量生成 N 份文档\"、\n"
+            + "\"依次调用 N 个 API\"、\"对每个文件执行同一操作\"等。\n\n"
+            + "**必须做的事**：\n"
+            + "1. **第一轮回复就用并行 tool_calls 批量注册全部子目标为 `pending`**\n"
+            + "   一条回复里 N 个 `progress_update` 同时发出（不要串行）。\n"
+            + "   例：要调研 10 个模型，第一轮就发 10 个 `progress_update(stepKey=\"model_xxx\", status=\"pending\")`。\n"
+            + "2. **每开始一个子目标**前发 `progress_update(同 stepKey, status=\"in_progress\")`。\n"
+            + "3. **每完成一个子目标**后立即发 `progress_update(同 stepKey, status=\"done\")`。\n"
+            + "4. **无法继续**时发 `progress_update(同 stepKey, status=\"blocked\", note=\"具体原因\")`。\n\n"
+            + "**为什么必须**：\n"
+            + "- 系统在你**每一次推理前**注入一份 \"## 当前任务进度\" 快照。\n"
+            + "  这是你**唯一可信**的\"已完成清单\"——比你记忆里的步骤更权威，因为上下文窗口\n"
+            + "  会被裁剪，老的工具调用记录会消失，但 ledger 不会。\n"
+            + "- 不维护 ledger 的后果（实测）：\n"
+            + "  · 上下文裁剪后忘记自己做过的步骤，重复执行已完成项 → 浪费迭代预算\n"
+            + "  · 漏做项目 → 任务不完整 → 撞 max_iterations 还没干完\n"
+            + "  · ledger snapshot 永远显示初始状态，对你毫无帮助\n\n"
+            + "**例外**：单一问题、简单问答、不可拆解的请求 — 不需要用。\n";
 
     private final ChatModel chatModel;
     private final List<ToolCallback> toolCallbacks;
@@ -511,11 +522,27 @@ public class ReasoningNode implements NodeAction {
         // history that produced those done entries. Suppressed when the
         // ledger column is empty so short single-turn questions stay
         // prompt-cache-friendly.
+        //
+        // Past iteration ~10, also emit a stale-reminder SystemMessage when
+        // the ledger looks abandoned (empty after many turns, or no
+        // progress_update in >90s). This pushes the model back to the
+        // ledger discipline before it drifts into the "I'm doing the work
+        // but never marking it" failure mode observed in round-4 of the
+        // LLM-review smoke test.
         if (progressLedgerService != null && conversationId != null && !conversationId.isBlank()) {
             try {
-                String snapshot = progressLedgerService.load(conversationId).renderSnapshot();
+                vip.mate.agent.progress.ProgressLedger ledger =
+                        progressLedgerService.load(conversationId);
+                String snapshot = ledger.renderSnapshot();
                 if (snapshot != null) {
                     nonHistoryPrefix.add(new SystemMessage(snapshot));
+                }
+                String staleReminder = ledger.renderStaleReminder(
+                        accessor.iterationCount(), java.time.Instant.now());
+                if (staleReminder != null) {
+                    nonHistoryPrefix.add(new SystemMessage(staleReminder));
+                    log.info("[ReasoningNode] Injected stale-ledger reminder at iter {} for conv {}",
+                            accessor.iterationCount(), conversationId);
                 }
             } catch (Exception e) {
                 // Never let a ledger-side failure break the reasoning step.
