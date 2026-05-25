@@ -9,6 +9,7 @@ import vip.mate.tool.builtin.ToolExecutionContext;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -180,6 +181,12 @@ public final class WorkspacePathGuard {
                 // Unparseable as a path — leave it alone, not our concern.
                 continue;
             }
+            if (isAllowedDeviceNode(normalized)) {
+                // Character devices like /dev/null, /dev/stdin, /dev/fd/0 don't
+                // expose any on-disk user data — allow them so common shell
+                // idioms (`2>/dev/null`, `cmd <(cat file)`) keep working.
+                continue;
+            }
             if (!normalized.startsWith(root)) {
                 throw new IllegalArgumentException(
                         "Shell command references path outside workspace boundary: "
@@ -210,6 +217,32 @@ public final class WorkspacePathGuard {
      */
     private static final Pattern OUTSIDE_ENV_VAR = Pattern.compile(
             "\\$\\{?(HOME|USER|LOGNAME|TMPDIR|TMP|TEMP|PWD|OLDPWD|PATH|MAIL)\\b");
+
+    /**
+     * Character device nodes that don't expose user data and are needed for
+     * common shell idioms (stderr suppression, process substitution, entropy).
+     * Linux/macOS only — the path strings are absolute POSIX paths; on
+     * Windows {@link #validateShellCommand} doesn't fire on these because
+     * a Windows command wouldn't normalize to a {@code /dev/...} string.
+     */
+    private static final Set<String> ALLOWED_DEVICE_NODES = Set.of(
+            "/dev/null",
+            "/dev/zero",
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/tty"
+    );
+
+    /** Match {@code /dev/fd/0}, {@code /dev/fd/1}, etc — used by process substitution. */
+    private static final Pattern ALLOWED_DEV_FD = Pattern.compile("^/dev/fd/\\d+$");
+
+    private static boolean isAllowedDeviceNode(Path normalized) {
+        String s = normalized.toString();
+        return ALLOWED_DEVICE_NODES.contains(s) || ALLOWED_DEV_FD.matcher(s).matches();
+    }
 
     private static String truncateForError(String s) {
         return s.length() > 200 ? s.substring(0, 200) + "..." : s;

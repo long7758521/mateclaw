@@ -172,4 +172,50 @@ class WorkspacePathGuardShellTest {
         assertDoesNotThrow(() ->
                 WorkspacePathGuard.validateShellCommand("printf '%s\\n' \"$MY_FLAG\""));
     }
+
+    // ==================== Device-node allowlist ====================
+
+    @Test
+    @DisplayName("/dev/null and other standard device nodes are allowed")
+    void deviceNodes_pass() {
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("find . -name '*.md' 2>/dev/null"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("ls -la > /dev/null"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("cat /dev/urandom | head -c 16"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("dd if=/dev/zero of=zeros.bin bs=1024 count=1"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("read line < /dev/stdin"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("echo hi > /dev/stderr"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("tty < /dev/tty"));
+    }
+
+    @Test
+    @DisplayName("/dev/fd/N (process substitution) is allowed")
+    void devFd_pass() {
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("diff <(sort file_a.txt) <(sort file_b.txt)"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("cat /dev/fd/0"));
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("read line < /dev/fd/3"));
+    }
+
+    @Test
+    @DisplayName("Non-allowlisted /dev/* paths still rejected")
+    void devOther_blocked() {
+        // Block-device-like paths must not be allowed by the allowlist.
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("dd if=/dev/disk0 of=image.bin"));
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("cat /dev/loop0"));
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("ls /dev/null/sneak"));
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("cat /dev/fd/notanumber"));
+    }
 }
