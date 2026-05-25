@@ -114,6 +114,11 @@ public final class WorkspacePathGuard {
      *       {@code cd /var}) whose normalized form is not under the workspace
      *       root — even when nested inside command substitution {@code $(...)}
      *       or backticks;</li>
+     *   <li>relative tokens containing {@code ..} as a directory segment
+     *       (e.g. {@code cd ..}, {@code cat ../foo}, {@code ln -s ../bar baz})
+     *       when the resolved path falls outside the workspace root —
+     *       in-workspace traversal like {@code subdir/../sibling} is allowed
+     *       because it normalizes back inside;</li>
      *   <li>tilde expansion ({@code ~}, {@code ~/...}) — always resolves to
      *       {@code $HOME}, which sits outside the workspace;</li>
      *   <li>references to environment variables ({@code $HOME}, {@code ${USER}},
@@ -193,6 +198,28 @@ public final class WorkspacePathGuard {
                                 + normalized + ", allowed root: " + root);
             }
         }
+
+        // 4. Relative tokens containing ".." — must resolve inside the workspace.
+        // Catches `cd ..`, `cat ../foo`, `ln -s ../bar baz`, `mv foo/../bar dst`,
+        // etc. In-workspace traversal (`subdir/../sibling`) normalizes back
+        // inside and passes.
+        Matcher traversalMatch = RELATIVE_TRAVERSAL_TOKEN.matcher(command);
+        while (traversalMatch.find()) {
+            String candidate = traversalMatch.group(1);
+            Path resolved;
+            try {
+                resolved = root.resolve(candidate).normalize();
+            } catch (Exception ex) {
+                continue;
+            }
+            if (isAllowedDeviceNode(resolved)) continue;
+            if (!resolved.startsWith(root)) {
+                throw new IllegalArgumentException(
+                        "Shell command uses parent-directory traversal that escapes the workspace: '"
+                                + candidate + "' would resolve to " + resolved
+                                + ", allowed root: " + root);
+            }
+        }
     }
 
     /**
@@ -205,6 +232,28 @@ public final class WorkspacePathGuard {
      */
     private static final Pattern ABS_PATH_TOKEN = Pattern.compile(
             "(?:^|[\\s|&;<>(`\"'={}])(?<!:)(/[^\\s|&;<>()\"'`{}=]+)");
+
+    /**
+     * Match relative tokens that contain {@code ..} as a path segment. Captures
+     * the whole token (prefix + {@code ..} + optional suffix) so the caller
+     * can resolve it against the workspace root and decide whether it escapes.
+     *
+     * <p>Matches:
+     * <ul>
+     *   <li>{@code ..}            ({@code cd ..}, bare arg)</li>
+     *   <li>{@code ../foo/bar}    (relative parent traversal)</li>
+     *   <li>{@code ./..}          ({@code cd ./..})</li>
+     *   <li>{@code foo/..}        ({@code rm foo/..})</li>
+     *   <li>{@code foo/../bar}    (in-workspace normalization)</li>
+     * </ul>
+     *
+     * <p>Does NOT match {@code abc..xyz} (no slash before/after the {@code ..} —
+     * not a path segment) or absolute {@code /foo/../bar} (handled by
+     * {@link #ABS_PATH_TOKEN}). The token must be bounded by a shell separator
+     * or end-of-string on both sides.
+     */
+    private static final Pattern RELATIVE_TRAVERSAL_TOKEN = Pattern.compile(
+            "(?:^|[\\s|&;<>(`\"'={}])((?:[^\\s|&;<>()\"'`{}=/]+/)*\\.\\.(?:/[^\\s|&;<>()\"'`{}=]*)?)(?=[\\s|&;<>)`\"'=}]|$)");
 
     /** Bare tilde or tilde at the start of a path token: {@code ~}, {@code ~/foo}, {@code "~/bar"}. */
     private static final Pattern TILDE_REF = Pattern.compile(

@@ -205,6 +205,65 @@ class WorkspacePathGuardShellTest {
                 WorkspacePathGuard.validateShellCommand("read line < /dev/fd/3"));
     }
 
+    // ==================== Relative parent-directory traversal ====================
+
+    @Test
+    @DisplayName("Bare `cd ..` → rejected")
+    void cdDotDot_blocked() {
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("cd .. && ls"));
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("cd .."));
+    }
+
+    @Test
+    @DisplayName("Relative parent traversal `../foo` → rejected")
+    void relativeParentTraversal_blocked() {
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("cat ../mateclaw/CLAUDE.md"));
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("head -3 ../README.md"));
+    }
+
+    @Test
+    @DisplayName("Symlink creation with relative outside-pointing target → rejected")
+    void relativeSymlinkEscape_blocked() {
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("ln -sf ../mateclaw breakout"));
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("ln -s ../../etc shortcut"));
+    }
+
+    @Test
+    @DisplayName("Deeper relative traversal `foo/../../bar` → rejected")
+    void deepRelativeTraversal_blocked() {
+        assertThrows(IllegalArgumentException.class, () ->
+                WorkspacePathGuard.validateShellCommand("cat subdir/../../other/file.txt"));
+    }
+
+    @Test
+    @DisplayName("In-workspace `..` traversal that normalizes back inside → allowed")
+    void inWorkspaceTraversal_pass() {
+        // subdir/../sibling → workspace/sibling, still inside.
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("cat subdir/../sibling.txt"));
+        // ./.. is at workspace root after normalize — still inside? No: ./.. is parent of cwd.
+        // We do want to reject that, which the regex will catch as escape.
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("ls foo/.."));  // resolves to workspace root
+    }
+
+    @Test
+    @DisplayName("Identifier with double-dot but no slash (e.g. `abc..xyz`) is not a path → allowed")
+    void doubleDotInIdentifier_pass() {
+        // "..foo" / "abc..xyz" should not be confused with parent traversal.
+        // These appear in version strings, env var values, etc.
+        assertDoesNotThrow(() ->
+                WorkspacePathGuard.validateShellCommand("echo version=1.2..3"));
+    }
+
+    // ==================== Device-node negative cases ====================
+
     @Test
     @DisplayName("Non-allowlisted /dev/* paths still rejected")
     void devOther_blocked() {

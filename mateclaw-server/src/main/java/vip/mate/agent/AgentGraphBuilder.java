@@ -375,11 +375,23 @@ public class AgentGraphBuilder {
                         entity.getName(), e.getMessage());
             }
         }
-        String resolvedBase = resolveAgentBasePath(entity.getWorkspaceBasePath(), workspaceBase);
+        String resolvedBase;
+        try {
+            resolvedBase = resolveAgentBasePath(entity.getWorkspaceBasePath(), workspaceBase);
+        } catch (IllegalArgumentException e) {
+            // Override violates the workspace-scoping rule (e.g. admin tried to
+            // set an absolute path outside the workspace root). Fall back to
+            // inheriting the workspace basePath so chat stays available, but
+            // surface the violation in logs so the admin can fix it.
+            log.warn("Agent {} workspaceBasePath override rejected, falling back to workspace: {}",
+                    entity.getName(), e.getMessage());
+            resolvedBase = workspaceBase;
+        }
         if (resolvedBase != null && !resolvedBase.isBlank()) {
             agent.workspaceBasePath = resolvedBase;
             boolean fromOverride = entity.getWorkspaceBasePath() != null
-                    && !entity.getWorkspaceBasePath().isBlank();
+                    && !entity.getWorkspaceBasePath().isBlank()
+                    && resolvedBase.equals(entity.getWorkspaceBasePath());
             log.info("Agent {} basePath = {} (source: {})",
                     entity.getName(), resolvedBase, fromOverride ? "agent-override" : "workspace");
         }
@@ -1165,7 +1177,12 @@ public class AgentGraphBuilder {
      * <p>Precedence:
      * <ol>
      *   <li>When the agent-level override is set, it wins.</li>
-     *   <li>An absolute override is used verbatim.</li>
+     *   <li>An absolute override is used verbatim, but only when it sits
+     *       inside the workspace basePath (or when the workspace has no
+     *       basePath of its own). An absolute path that points outside a
+     *       configured workspace root is rejected — otherwise a less-trusted
+     *       user with agent-edit access could set
+     *       {@code workspaceBasePath="/"} and bypass workspace scoping.</li>
      *   <li>A relative override is resolved <em>under</em> the workspace basePath
      *       when the workspace has one, matching the UI hint that agent paths
      *       are relative to the workspace root.</li>
@@ -1174,6 +1191,9 @@ public class AgentGraphBuilder {
      *   <li>With no override, the workspace basePath is inherited verbatim;
      *       returns {@code null} when neither side has a value.</li>
      * </ol>
+     *
+     * @throws IllegalArgumentException when an absolute override escapes the
+     *         workspace root
      */
     static String resolveAgentBasePath(String agentOverride, String workspaceBase) {
         boolean hasOverride = agentOverride != null && !agentOverride.isBlank();
@@ -1183,6 +1203,15 @@ public class AgentGraphBuilder {
         }
         Path overridePath = Paths.get(agentOverride);
         if (overridePath.isAbsolute()) {
+            if (hasWorkspace) {
+                Path wsRoot = Paths.get(workspaceBase).toAbsolutePath().normalize();
+                Path absOverride = overridePath.toAbsolutePath().normalize();
+                if (!absOverride.startsWith(wsRoot)) {
+                    throw new IllegalArgumentException(
+                            "Agent workspaceBasePath override must be inside the workspace root: "
+                                    + absOverride + " is not under " + wsRoot);
+                }
+            }
             return agentOverride;
         }
         if (hasWorkspace) {

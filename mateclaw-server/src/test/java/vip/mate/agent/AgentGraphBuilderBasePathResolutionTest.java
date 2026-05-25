@@ -39,21 +39,21 @@ class AgentGraphBuilderBasePathResolutionTest {
     }
 
     @Test
-    @DisplayName("Agent override is absolute → used verbatim, workspace ignored")
+    @DisplayName("Agent override is absolute and inside workspace → used verbatim")
     @DisabledOnOs(OS.WINDOWS)
-    void absoluteOverride_usedAsIs_unix() {
-        assertEquals("/opt/agents/code-review",
-                AgentGraphBuilder.resolveAgentBasePath("/opt/agents/code-review", "/srv/ws-root"));
+    void absoluteOverride_insideWs_usedAsIs_unix() {
+        assertEquals("/srv/ws-root/agents/code-review",
+                AgentGraphBuilder.resolveAgentBasePath("/srv/ws-root/agents/code-review", "/srv/ws-root"));
         assertEquals("/opt/agents/code-review",
                 AgentGraphBuilder.resolveAgentBasePath("/opt/agents/code-review", null));
     }
 
     @Test
-    @DisplayName("Agent override is absolute (Windows) → used verbatim")
+    @DisplayName("Agent override is absolute (Windows) and inside workspace → used verbatim")
     @EnabledOnOs(OS.WINDOWS)
-    void absoluteOverride_usedAsIs_windows() {
-        assertEquals("C:\\agents\\code-review",
-                AgentGraphBuilder.resolveAgentBasePath("C:\\agents\\code-review", "C:\\ws-root"));
+    void absoluteOverride_insideWs_usedAsIs_windows() {
+        assertEquals("C:\\ws-root\\agents\\code-review",
+                AgentGraphBuilder.resolveAgentBasePath("C:\\ws-root\\agents\\code-review", "C:\\ws-root"));
     }
 
     @Test
@@ -78,5 +78,45 @@ class AgentGraphBuilderBasePathResolutionTest {
     void relativeOverride_blankWorkspace_usedAsIs() {
         assertEquals("agent-dir",
                 AgentGraphBuilder.resolveAgentBasePath("agent-dir", "   "));
+    }
+
+    // ==================== Absolute override scoped to workspace root ====================
+
+    @Test
+    @DisplayName("Absolute override inside workspace root → allowed verbatim")
+    @DisabledOnOs(OS.WINDOWS)
+    void absoluteOverride_insideWorkspace_allowed() {
+        // /srv/ws-root/agents/code-review starts with /srv/ws-root → fine.
+        assertEquals("/srv/ws-root/agents/code-review",
+                AgentGraphBuilder.resolveAgentBasePath("/srv/ws-root/agents/code-review", "/srv/ws-root"));
+        // Identical to workspace root → trivially allowed.
+        assertEquals("/srv/ws-root",
+                AgentGraphBuilder.resolveAgentBasePath("/srv/ws-root", "/srv/ws-root"));
+    }
+
+    @Test
+    @DisplayName("Absolute override outside workspace root → rejected (workspace-scoping bypass)")
+    @DisabledOnOs(OS.WINDOWS)
+    void absoluteOverride_outsideWorkspace_rejected() {
+        // A less-trusted admin could set / or another repo and bypass scoping —
+        // reject it so the override stays inside the team workspace.
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () ->
+                AgentGraphBuilder.resolveAgentBasePath("/etc", "/srv/ws-root"));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () ->
+                AgentGraphBuilder.resolveAgentBasePath("/", "/srv/ws-root"));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () ->
+                AgentGraphBuilder.resolveAgentBasePath("/Users/admin/other-project",
+                        "/srv/ws-root"));
+    }
+
+    @Test
+    @DisplayName("Absolute override with no workspace basePath → used verbatim (legacy)")
+    @DisabledOnOs(OS.WINDOWS)
+    void absoluteOverride_noWorkspace_allowed() {
+        // No workspace boundary to enforce — fall back to legacy behavior.
+        assertEquals("/Users/admin/scratch",
+                AgentGraphBuilder.resolveAgentBasePath("/Users/admin/scratch", null));
+        assertEquals("/Users/admin/scratch",
+                AgentGraphBuilder.resolveAgentBasePath("/Users/admin/scratch", ""));
     }
 }
