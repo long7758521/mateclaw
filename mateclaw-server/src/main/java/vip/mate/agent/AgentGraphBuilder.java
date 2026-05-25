@@ -56,6 +56,8 @@ import vip.mate.channel.web.ChatStreamTracker;
 import vip.mate.wiki.service.WikiContextService;
 
 import java.lang.reflect.Field;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -358,20 +360,28 @@ public class AgentGraphBuilder {
         agent.topP = runtimeModel.getTopP();
         agent.toolCallingEnabled = toolCallingEnabled;
 
-        // Agent 级别覆盖优先，否则继承工作区
-        if (entity.getWorkspaceBasePath() != null && !entity.getWorkspaceBasePath().isBlank()) {
-            agent.workspaceBasePath = entity.getWorkspaceBasePath();
-            log.info("Agent {} using agent-level basePath: {}", entity.getName(), agent.workspaceBasePath);
-        } else if (entity.getWorkspaceId() != null) {
+        // Agent-level override takes priority; a relative override is resolved
+        // under the workspace basePath so admins can express agent directories
+        // relative to the workspace root (matching the UI hint).
+        String workspaceBase = null;
+        if (entity.getWorkspaceId() != null) {
             try {
                 var workspace = workspaceService.getById(entity.getWorkspaceId());
-                if (workspace != null && workspace.getBasePath() != null && !workspace.getBasePath().isBlank()) {
-                    agent.workspaceBasePath = workspace.getBasePath();
-                    log.info("Agent {} inherited workspace basePath: {}", entity.getName(), agent.workspaceBasePath);
+                if (workspace != null) {
+                    workspaceBase = workspace.getBasePath();
                 }
             } catch (Exception e) {
-                log.warn("Failed to lookup workspace basePath for agent {}: {}", entity.getName(), e.getMessage());
+                log.warn("Failed to lookup workspace basePath for agent {}: {}",
+                        entity.getName(), e.getMessage());
             }
+        }
+        String resolvedBase = resolveAgentBasePath(entity.getWorkspaceBasePath(), workspaceBase);
+        if (resolvedBase != null && !resolvedBase.isBlank()) {
+            agent.workspaceBasePath = resolvedBase;
+            boolean fromOverride = entity.getWorkspaceBasePath() != null
+                    && !entity.getWorkspaceBasePath().isBlank();
+            log.info("Agent {} basePath = {} (source: {})",
+                    entity.getName(), resolvedBase, fromOverride ? "agent-override" : "workspace");
         }
 
         log.info("Built agent instance: {} (type={}, protocol={}, tools={}, toolCallingEnabled={})",
@@ -1148,6 +1158,37 @@ public class AgentGraphBuilder {
             }
         }
         return reordered;
+    }
+
+    /**
+     * Resolve the effective working directory for an agent.
+     * <p>Precedence:
+     * <ol>
+     *   <li>When the agent-level override is set, it wins.</li>
+     *   <li>An absolute override is used verbatim.</li>
+     *   <li>A relative override is resolved <em>under</em> the workspace basePath
+     *       when the workspace has one, matching the UI hint that agent paths
+     *       are relative to the workspace root.</li>
+     *   <li>A relative override with no workspace basePath is used as-is
+     *       (resolves against the JVM working directory at file-tool time).</li>
+     *   <li>With no override, the workspace basePath is inherited verbatim;
+     *       returns {@code null} when neither side has a value.</li>
+     * </ol>
+     */
+    static String resolveAgentBasePath(String agentOverride, String workspaceBase) {
+        boolean hasOverride = agentOverride != null && !agentOverride.isBlank();
+        boolean hasWorkspace = workspaceBase != null && !workspaceBase.isBlank();
+        if (!hasOverride) {
+            return hasWorkspace ? workspaceBase : null;
+        }
+        Path overridePath = Paths.get(agentOverride);
+        if (overridePath.isAbsolute()) {
+            return agentOverride;
+        }
+        if (hasWorkspace) {
+            return Paths.get(workspaceBase).resolve(agentOverride).toString();
+        }
+        return agentOverride;
     }
 
     /**
