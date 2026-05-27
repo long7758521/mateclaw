@@ -15,6 +15,7 @@ import vip.mate.approval.grant.repository.ApprovalGrantMapper;
 import vip.mate.approval.grant.repository.ApprovalResolutionLogMapper;
 import vip.mate.approval.grant.service.ApprovalGrantService;
 import vip.mate.auth.model.UserEntity;
+import vip.mate.auth.repository.UserMapper;
 import vip.mate.auth.service.AuthService;
 import vip.mate.common.result.R;
 import vip.mate.exception.MateClawException;
@@ -57,6 +58,7 @@ public class ApprovalGrantController {
     private final ApprovalGrantMapper grantMapper;
     private final ApprovalResolutionLogMapper resolutionMapper;
     private final AuthService authService;
+    private final UserMapper userMapper;
     private final WorkspaceService workspaceService;
 
     // ─── Create ─────────────────────────────────────────────────────────
@@ -139,7 +141,39 @@ public class ApprovalGrantController {
             wrapper.eq(ApprovalGrant::getGrantedBy, actorId);
         }
         Page<ApprovalGrant> pageObj = new Page<>(boundedPage, boundedSize);
-        return R.ok(grantMapper.selectPage(pageObj, wrapper));
+        IPage<ApprovalGrant> result = grantMapper.selectPage(pageObj, wrapper);
+        fillGranterNames(result.getRecords());
+        return R.ok(result);
+    }
+
+    /**
+     * Batch-loads the display name (nickname → username fallback) for every
+     * unique {@code grantedBy} id on the page and writes it into the entity's
+     * transient {@code grantedByName} field. One round-trip via
+     * {@code selectBatchIds} rather than N queries; the field stays null when
+     * the source user has since been deleted.
+     */
+    private void fillGranterNames(java.util.List<ApprovalGrant> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        java.util.Set<Long> userIds = new java.util.HashSet<>();
+        for (ApprovalGrant g : records) {
+            if (g.getGrantedBy() != null) userIds.add(g.getGrantedBy());
+        }
+        if (userIds.isEmpty()) return;
+        java.util.Map<Long, String> idToName = userMapper.selectBatchIds(userIds).stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        UserEntity::getId,
+                        u -> u.getNickname() != null && !u.getNickname().isEmpty()
+                                ? u.getNickname()
+                                : u.getUsername(),
+                        (a, b) -> a));
+        for (ApprovalGrant g : records) {
+            if (g.getGrantedBy() != null) {
+                g.setGrantedByName(idToName.get(g.getGrantedBy()));
+            }
+        }
     }
 
     // ─── Active summary (chip "(N)") ────────────────────────────────────

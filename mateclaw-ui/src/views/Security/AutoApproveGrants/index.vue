@@ -104,22 +104,35 @@
             </td>
             <td>{{ t(`approval.grant.kind.${kindI18nKey(row.grantKind)}`) }}</td>
             <td class="muted">{{ formatDate(row.expireAt) }}</td>
-            <td>{{ row.grantedBy }}</td>
-            <td class="note-cell" :title="row.note || ''">{{ row.note }}</td>
             <td>
+              <span v-if="row.grantedByName" :title="`#${row.grantedBy}`">{{ row.grantedByName }}</span>
+              <span v-else class="muted">#{{ row.grantedBy }}</span>
+            </td>
+            <td>
+              <span class="note-cell" :title="row.note || ''">{{ row.note }}</span>
+            </td>
+            <td class="col-actions">
               <button
                 v-if="row.revoked === 0"
-                class="action-btn danger"
+                class="row-action-btn row-action-btn--danger"
                 :title="t('approval.grant.revokeBtn')"
                 @click="confirmRevoke(row)"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
                      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="3 6 5 6 21 6"/>
                   <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                 </svg>
+                <span>{{ t('approval.grant.revokeBtn') }}</span>
               </button>
-              <span v-else class="muted">{{ t('common.revoked') }}</span>
+              <span v-else class="revoked-pill">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="9"/>
+                  <line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/>
+                </svg>
+                {{ t('common.revoked') }}
+              </span>
             </td>
           </tr>
         </tbody>
@@ -610,7 +623,19 @@ onMounted(loadGrants)
   overflow-x: auto;
 }
 .rules-table {
-  min-width: 900px;
+  min-width: 1100px; /* enough headroom so the kind / granter / date columns
+                        don't collapse into vertical-text mode on a narrow viewport */
+}
+/* Prevent narrow columns from wrapping into stacked Chinese glyphs. */
+.rules-table th,
+.rules-table td {
+  white-space: nowrap;
+}
+/* Note cell is the one cell where wrapping is fine — it's already
+   ellipsis-truncated by .note-cell. Keep this explicit so adding nowrap to
+   the wider scope above doesn't suppress the ellipsis. */
+.rules-table td .note-cell {
+  white-space: nowrap;
 }
 
 /* Pagination row — right-aligned beneath the table. McPagination provides

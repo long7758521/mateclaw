@@ -52,6 +52,15 @@ public class ApprovalGrant {
 
     private Long grantedBy;
 
+    /**
+     * Display name of the granter (nickname → username). Not persisted; the
+     * controller fills it in after {@code selectPage} by batch-loading the
+     * touched user ids so the UI doesn't need a separate /users call for a
+     * snowflake → name lookup. Null when the user no longer exists.
+     */
+    @TableField(exist = false)
+    private String grantedByName;
+
     private LocalDateTime grantedAt;
 
     private Integer revoked;

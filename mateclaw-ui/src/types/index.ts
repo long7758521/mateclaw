@@ -1043,6 +1043,8 @@ export interface ApprovalGrant {
   grantKind: GrantKind
   expireAt: string | null
   grantedBy: string
+  /** Display name (nickname → username) of the granter; null if the user was deleted. */
+  grantedByName?: string | null
   grantedAt: string
   revoked: number
   revokedBy: string | null
