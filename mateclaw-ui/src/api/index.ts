@@ -2,6 +2,7 @@ import axios from 'axios'
 import { handleAuthFailure, updateTokenFromHeader } from '@/utils/auth'
 import type {
   ApprovalGrant,
+  ApprovalGrantPage,
   ActiveGrantsSummary,
   CreateGrantPayload,
   ResolutionLog,
@@ -1291,13 +1292,18 @@ export const goalApi = {
  * keep them as strings end-to-end and never run them through Number().
  */
 export const approvalApi = {
-  /** List grants visible in the current workspace. mine=true skips the admin gate. */
+  /**
+   * List grants visible in the current workspace, paged. mine=true skips the
+   * admin gate. Page is 1-based; size is bounded server-side to [1, 200].
+   */
   listGrants: (params?: {
     scopeType?: GrantScope
     toolName?: string
     revoked?: 0 | 1
     mine?: boolean
-  }) => http.get<ApprovalGrant[]>('/approval/grants', { params }),
+    page?: number
+    size?: number
+  }) => http.get<ApprovalGrantPage>('/approval/grants', { params }),
 
   /** Active-grant summary used by the global chip + ChatInput pill counters. */
   activeSummary: () =>

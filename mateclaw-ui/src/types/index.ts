@@ -1057,6 +1057,21 @@ export interface ActiveGrantsSummary {
 }
 
 /**
+ * Paged response shape from /approval/grants. Mirrors the MyBatis Plus
+ * {@code IPage} JSON layout already used by skills and other paged endpoints in
+ * mateclaw. {@code total/size/current/pages} arrive as JSON strings because the
+ * global Long→String serializer catches them; the consumer coerces via
+ * {@code Number(...)} at the use site so the el-pagination component gets numbers.
+ */
+export interface ApprovalGrantPage {
+  records: ApprovalGrant[]
+  total: number | string
+  size: number | string
+  current: number | string
+  pages: number | string
+}
+
+/**
  * Approval-layer final decision row. workspaceId can be null for HARD_BLOCK
  * events that fired before workspace resolution.
  */

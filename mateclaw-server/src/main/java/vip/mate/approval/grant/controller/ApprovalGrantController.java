@@ -1,6 +1,8 @@
 package vip.mate.approval.grant.controller;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -96,14 +98,16 @@ public class ApprovalGrantController {
 
     // ─── List ───────────────────────────────────────────────────────────
 
-    @Operation(summary = "列出当前 workspace 的自动批准策略")
+    @Operation(summary = "列出当前 workspace 的自动批准策略（分页）")
     @GetMapping("/grants")
     @RequireWorkspaceRole("member")
-    public R<List<ApprovalGrant>> list(
+    public R<IPage<ApprovalGrant>> list(
             @RequestParam(required = false) String scopeType,
             @RequestParam(required = false) String toolName,
             @RequestParam(required = false) Integer revoked,
             @RequestParam(required = false, defaultValue = "false") boolean mine,
+            @RequestParam(required = false, defaultValue = "1") long page,
+            @RequestParam(required = false, defaultValue = "20") long size,
             @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId,
             Authentication auth) {
         Long actorId = resolveUserId(auth);
@@ -113,6 +117,10 @@ public class ApprovalGrantController {
         if (!mine) {
             workspaceService.requirePermission(ws, actorId, "admin");
         }
+
+        // Bound page size so a malformed client can't blow up the UI / mapper.
+        long boundedSize = Math.min(Math.max(size, 1), 200);
+        long boundedPage = Math.max(page, 1);
 
         var wrapper = Wrappers.<ApprovalGrant>lambdaQuery()
                 .eq(ApprovalGrant::getWorkspaceId, ws)
@@ -130,7 +138,8 @@ public class ApprovalGrantController {
         if (mine) {
             wrapper.eq(ApprovalGrant::getGrantedBy, actorId);
         }
-        return R.ok(grantMapper.selectList(wrapper));
+        Page<ApprovalGrant> pageObj = new Page<>(boundedPage, boundedSize);
+        return R.ok(grantMapper.selectPage(pageObj, wrapper));
     }
 
     // ─── Active summary (chip "(N)") ────────────────────────────────────

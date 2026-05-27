@@ -202,9 +202,11 @@ class ApprovalGrantControllerTest {
 
         @Test
         void list_mine_does_not_require_admin() {
-            when(grantMapper.selectList(any())).thenReturn(List.of());
+            // selectPage returns a Page object; the test only cares about the auth
+            // path, so the mapper stub just needs to not NPE.
+            when(grantMapper.selectPage(any(), any())).thenReturn(new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>());
 
-            controller.list(null, null, null, /*mine*/ true, WORKSPACE_ID, memberAuth);
+            controller.list(null, null, null, /*mine*/ true, 1L, 20L, WORKSPACE_ID, memberAuth);
 
             verify(workspaceService, never()).requirePermission(anyLong(), anyLong(), anyString());
         }
@@ -215,7 +217,7 @@ class ApprovalGrantControllerTest {
                     .when(workspaceService).requirePermission(WORKSPACE_ID, MEMBER_ID, "admin");
 
             assertThatThrownBy(() ->
-                    controller.list(null, null, null, /*mine*/ false, WORKSPACE_ID, memberAuth))
+                    controller.list(null, null, null, /*mine*/ false, 1L, 20L, WORKSPACE_ID, memberAuth))
                     .isInstanceOf(MateClawException.class);
         }
 
