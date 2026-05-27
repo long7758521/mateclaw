@@ -638,6 +638,40 @@ onMounted(loadGrants)
   white-space: nowrap;
 }
 
+/*
+  Sticky "Actions" column — pinned to the right so the revoke control stays
+  reachable when the table horizontally scrolls. The cell needs an opaque
+  background or rows scrolling underneath would bleed through; we pull from
+  the same token the table sits on so the pinned column looks like it's
+  always been part of the surface rather than a floating overlay. A faint
+  left border doubles as the visual divider between the scrollable region
+  and the pinned column when content actually overflows.
+*/
+.rules-table th.col-actions,
+.rules-table td.col-actions {
+  position: sticky;
+  right: 0;
+  background: var(--mc-surface-primary, #fff);
+  box-shadow: -6px 0 8px -8px rgba(0, 0, 0, 0.08);
+  z-index: 2;
+}
+.rules-table th.col-actions {
+  /* Header sits above body when the user scrolls vertically inside a
+     scrollable area. Doesn't matter today (the page itself scrolls), but
+     cheap to set and future-proof. */
+  z-index: 3;
+  background: var(--mc-bg-sunken);
+}
+/* Sticky cell needs its own dim treatment for revoked rows since opacity on
+   the <tr> doesn't reach a sticky child (the row's stacking context shifts). */
+.rules-table tr.row-revoked td.col-actions {
+  opacity: 0.55;
+}
+:global(html.dark .rules-table td.col-actions) {
+  background: var(--mc-bg-muted, #1a130e);
+  box-shadow: -6px 0 10px -8px rgba(0, 0, 0, 0.4);
+}
+
 /* Pagination row — right-aligned beneath the table. McPagination provides
    its own pill background, so just lay it out. */
 .grants-pagination-row {
