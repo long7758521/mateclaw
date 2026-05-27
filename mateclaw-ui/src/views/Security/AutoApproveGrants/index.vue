@@ -18,9 +18,13 @@
         <h2 class="section-title">{{ t('approval.grant.title') }}</h2>
         <!-- Inline summary pill — same "danger-tinted info" tokens as the
              sidebar chip so the two surfaces feel like one design language.
-             No el-tag here: keeps the page entirely native + token-driven. -->
-        <span v-if="total > 0" class="summary-pill">
-          {{ t('approval.grant.chipLabel', { count: total }) }}
+             No el-tag here: keeps the page entirely native + token-driven.
+             Bound to activeCount (from /approval/grants/active) NOT total —
+             total includes revoked rows since the list endpoint returns
+             history by default, and the pill messaging ("已启用") only
+             makes sense for grants that are currently in force. -->
+        <span v-if="activeCount > 0" class="summary-pill">
+          {{ t('approval.grant.chipLabel', { count: activeCount }) }}
         </span>
         <p class="section-desc">{{ t('approval.grant.desc') }}</p>
       </div>
@@ -283,13 +287,14 @@
         </div>
       </div>
     </Teleport>
+
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   Delete,
   Lock,
@@ -301,6 +306,7 @@ import {
 } from '@element-plus/icons-vue'
 import { approvalApi } from '@/api'
 import McPagination from '@/components/common/McPagination.vue'
+import { mcConfirm } from '@/components/common/useConfirm'
 import type {
   ApprovalGrant,
   CreateGrantPayload,
@@ -313,6 +319,10 @@ const { t } = useI18n()
 
 const rows = ref<ApprovalGrant[]>([])
 const total = ref(0)
+// Active grants count for the summary pill — separate from `total` because the
+// list endpoint returns revoked history by default and the pill should only
+// reflect grants currently in force.
+const activeCount = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
@@ -376,12 +386,25 @@ async function loadGrants() {
     // numeric page metadata at the boundary so el-pagination gets real numbers.
     rows.value = Array.isArray(data?.records) ? data.records : []
     total.value = Number(data?.total ?? 0)
+    // Refresh active-only count for the summary pill in parallel with the
+    // list; non-blocking on failure so the page still renders normally.
+    refreshActiveCount()
   } catch (e: any) {
     ElMessage.error(e?.message || 'Failed to load grants')
     rows.value = []
     total.value = 0
   } finally {
     loading.value = false
+  }
+}
+
+async function refreshActiveCount() {
+  try {
+    const res = await approvalApi.activeSummary()
+    const data = (res as any).data ?? res
+    activeCount.value = Number(data?.count ?? 0)
+  } catch {
+    activeCount.value = 0
   }
 }
 
@@ -443,15 +466,17 @@ async function submitCreate() {
 }
 
 async function confirmRevoke(g: ApprovalGrant) {
-  try {
-    await ElMessageBox.confirm(
-      t('approval.grant.revokeConfirm'),
-      t('approval.grant.revokeBtn'),
-      { type: 'warning' },
-    )
-  } catch {
-    return
-  }
+  // Project-wide imperative confirm — same component used by McpServers,
+  // Channels, LivePanel, etc. so the destructive prompt feels consistent
+  // across the app. `tone: 'danger'` paints the confirm button red.
+  const target = g.toolName || t('approval.grant.anyTool')
+  const ok = await mcConfirm({
+    title: t('approval.grant.revokeBtn'),
+    message: t('approval.grant.revokeConfirmDetailed', { tool: target }),
+    confirmText: t('approval.grant.revokeBtn'),
+    tone: 'danger',
+  })
+  if (!ok) return
   try {
     await approvalApi.revokeGrant(g.id)
     ElMessage.success(t('common.success'))

@@ -3845,6 +3845,8 @@ export default {
       createWorkspaceWarning: '该策略将允许此工作区内所有用户的所有工具调用自动通过审批。地板规则仍会阻断灾难性命令，但其他风险都将被绕过。请输入登录密码确认。',
       revokeBtn: '撤销',
       revokeConfirm: '撤销后此策略将不再生效。继续？',
+      revokeConfirmDetailed: '撤销后 {tool} 的自动批准将不再生效，下次调用会重新走人工审批。继续？',
+      anyTool: '所有工具',
       viewResolutions: '查看本规则触发的 {count} 次自动通过 →',
       empty: '尚未配置自动批准策略',
       columns: {

@@ -3753,6 +3753,8 @@ export default {
       createWorkspaceWarning: 'This rule will auto-approve every tool call from every user in this workspace. Safety-floor patterns still block disaster commands, but every other risk gets bypassed. Confirm with your login password.',
       revokeBtn: 'Revoke',
       revokeConfirm: 'Revoking will disable this rule. Continue?',
+      revokeConfirmDetailed: 'After revoking, auto-approve for {tool} will no longer apply — the next call will require manual review again. Continue?',
+      anyTool: 'all tools',
       viewResolutions: 'View {count} auto-approve events triggered by this rule →',
       empty: 'No auto-approve rules configured yet',
       columns: {
