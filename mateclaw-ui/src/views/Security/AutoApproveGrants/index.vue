@@ -16,17 +16,12 @@
     <div class="section-header">
       <div class="section-header__title">
         <h2 class="section-title">{{ t('approval.grant.title') }}</h2>
-        <el-tag
-          v-if="total > 0"
-          type="warning"
-          size="small"
-          effect="light"
-          round
-          disable-transitions
-          class="active-summary"
-        >
+        <!-- Inline summary pill — same "danger-tinted info" tokens as the
+             sidebar chip so the two surfaces feel like one design language.
+             No el-tag here: keeps the page entirely native + token-driven. -->
+        <span v-if="total > 0" class="summary-pill">
           {{ t('approval.grant.chipLabel', { count: total }) }}
-        </el-tag>
+        </span>
         <p class="section-desc">{{ t('approval.grant.desc') }}</p>
       </div>
       <div class="section-header__actions">
@@ -54,113 +49,93 @@
       </div>
     </div>
 
-    <div class="config-card">
-      <el-table
-        v-loading="loading"
-        :data="rows"
-        :empty-text="t('approval.grant.empty')"
-        size="small"
-        stripe
-      >
-        <el-table-column :label="t('approval.grant.columns.scope')" min-width="180">
-          <template #default="{ row }">
-            <el-tag
-              :type="scopeTagType(row.scopeType)"
-              size="small"
-              effect="light"
-              disable-transitions
-            >
-              {{ t(`approval.grant.scope.${scopeI18nKey(row.scopeType)}`) }}
-            </el-tag>
-            <span class="scope-id">{{ row.scopeId }}</span>
-          </template>
-        </el-table-column>
+    <!--
+      Table + pagination — native HTML, no Element Plus components. Mirrors
+      the ToolGuard / AuditLogs pattern (rules-table-wrapper + .rules-table
+      + .severity-badge / .action-btn from shared.css) so this page reads
+      like any other Security sub-view. Pagination uses the shared
+      McPagination component, which is also fully native (no el-pagination).
+    -->
+    <div class="rules-table-wrapper">
+      <table class="rules-table">
+        <thead>
+          <tr>
+            <th>{{ t('approval.grant.columns.scope') }}</th>
+            <th>{{ t('approval.grant.columns.tool') }}</th>
+            <th>{{ t('approval.grant.columns.rule') }}</th>
+            <th>{{ t('approval.grant.columns.severity') }}</th>
+            <th>{{ t('approval.grant.columns.kind') }}</th>
+            <th>{{ t('approval.grant.columns.expire') }}</th>
+            <th>{{ t('approval.grant.columns.grantedBy') }}</th>
+            <th>{{ t('approval.grant.columns.note') }}</th>
+            <th class="col-actions">{{ t('approval.grant.columns.actions') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="row in rows"
+            :key="row.id"
+            :class="{ 'row-revoked': row.revoked === 1 }"
+          >
+            <td>
+              <span
+                class="scope-badge"
+                :class="`scope-${scopeI18nKey(row.scopeType)}`"
+              >
+                {{ t(`approval.grant.scope.${scopeI18nKey(row.scopeType)}`) }}
+              </span>
+              <div class="scope-id" :title="row.scopeId">{{ row.scopeId }}</div>
+            </td>
+            <td>
+              <code v-if="row.toolName" class="mono">{{ row.toolName }}</code>
+              <span v-else class="severity-badge severity-high">∗ any</span>
+            </td>
+            <td>
+              <code v-if="row.ruleId" class="mono">{{ row.ruleId }}</code>
+              <span v-else class="muted">∗</span>
+            </td>
+            <td>
+              <span
+                class="severity-badge"
+                :class="`severity-${row.maxSeverity?.toLowerCase()}`"
+              >
+                {{ row.maxSeverity }}
+              </span>
+            </td>
+            <td>{{ t(`approval.grant.kind.${kindI18nKey(row.grantKind)}`) }}</td>
+            <td class="muted">{{ formatDate(row.expireAt) }}</td>
+            <td>{{ row.grantedBy }}</td>
+            <td class="note-cell" :title="row.note || ''">{{ row.note }}</td>
+            <td>
+              <button
+                v-if="row.revoked === 0"
+                class="action-btn danger"
+                :title="t('approval.grant.revokeBtn')"
+                @click="confirmRevoke(row)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                </svg>
+              </button>
+              <span v-else class="muted">{{ t('common.revoked') }}</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-if="loading" class="empty-state">{{ t('common.loading') }}</div>
+      <div v-else-if="!rows.length" class="empty-state">{{ t('approval.grant.empty') }}</div>
+    </div>
 
-        <el-table-column
-          :label="t('approval.grant.columns.tool')"
-          prop="toolName"
-          min-width="140"
-        >
-          <template #default="{ row }">
-            <code v-if="row.toolName" class="mono">{{ row.toolName }}</code>
-            <el-tag v-else type="danger" size="small" effect="dark">∗ any</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column :label="t('approval.grant.columns.rule')" min-width="140">
-          <template #default="{ row }">
-            <code v-if="row.ruleId" class="mono">{{ row.ruleId }}</code>
-            <span v-else class="muted">∗</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column
-          :label="t('approval.grant.columns.severity')"
-          prop="maxSeverity"
-          width="110"
-        >
-          <template #default="{ row }">
-            <el-tag :type="severityTagType(row.maxSeverity)" size="small" disable-transitions>
-              {{ row.maxSeverity }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column :label="t('approval.grant.columns.kind')" width="140">
-          <template #default="{ row }">
-            {{ t(`approval.grant.kind.${kindI18nKey(row.grantKind)}`) }}
-          </template>
-        </el-table-column>
-
-        <el-table-column :label="t('approval.grant.columns.expire')" width="160">
-          <template #default="{ row }">
-            <span class="muted">{{ formatDate(row.expireAt) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column
-          :label="t('approval.grant.columns.grantedBy')"
-          prop="grantedBy"
-          width="120"
-        />
-
-        <el-table-column :label="t('approval.grant.columns.note')" min-width="160">
-          <template #default="{ row }">
-            <span :title="row.note || ''" class="note-cell">{{ row.note }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column :label="t('approval.grant.columns.actions')" width="100" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              v-if="row.revoked === 0"
-              :icon="Delete"
-              type="danger"
-              size="small"
-              text
-              @click="confirmRevoke(row)"
-            >
-              {{ t('approval.grant.revokeBtn') }}
-            </el-button>
-            <el-tag v-else type="info" size="small" effect="plain" disable-transitions>
-              {{ t('common.revoked') }}
-            </el-tag>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <el-pagination
-        v-if="total > 0"
-        class="grants-pagination"
-        v-model:current-page="currentPage"
-        v-model:page-size="pageSize"
+    <div v-if="total > 0" class="grants-pagination-row">
+      <McPagination
+        :page="currentPage"
+        :size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
-        layout="total, sizes, prev, pager, next, jumper"
-        background
-        small
-        @size-change="loadGrants"
-        @current-change="loadGrants"
+        :sizes="[10, 20, 50, 100]"
+        @update:page="onPageChange"
+        @update:size="onSizeChange"
       />
     </div>
 
@@ -312,6 +287,7 @@ import {
   WarningFilled,
 } from '@element-plus/icons-vue'
 import { approvalApi } from '@/api'
+import McPagination from '@/components/common/McPagination.vue'
 import type {
   ApprovalGrant,
   CreateGrantPayload,
@@ -364,6 +340,16 @@ const requiresPassword = computed(() => {
   const noTool = !form.toolName
   return noTool && (form.scopeType === 'WORKSPACE' || form.scopeType === 'AGENT')
 })
+
+function onPageChange(p: number) {
+  currentPage.value = p
+  loadGrants()
+}
+function onSizeChange(s: number) {
+  pageSize.value = s
+  currentPage.value = 1
+  loadGrants()
+}
 
 async function loadGrants() {
   loading.value = true
@@ -471,23 +457,6 @@ function scopeI18nKey(scope: GrantScope): string {
   }
 }
 
-function scopeTagType(scope: GrantScope): 'primary' | 'success' | 'warning' | 'danger' | 'info' {
-  switch (scope) {
-    case 'CONVERSATION': return 'primary'
-    case 'AGENT': return 'warning'
-    case 'USER': return 'success'
-    case 'WORKSPACE': return 'danger'
-  }
-}
-
-function severityTagType(sev: GrantSeverity): 'success' | 'warning' | 'danger' {
-  switch (sev) {
-    case 'LOW': return 'success'
-    case 'MEDIUM': return 'warning'
-    case 'HIGH': return 'danger'
-  }
-}
-
 function kindI18nKey(kind: GrantKind): string {
   switch (kind) {
     case 'ALWAYS': return 'always'
@@ -523,8 +492,19 @@ onMounted(loadGrants)
   flex-basis: 100%;
   margin: 4px 0 0;
 }
-.active-summary {
+/* Summary pill — reuses the same danger-tinted tokens as the sidebar chip
+   so the two surfaces feel like one design language; no el-tag here. */
+.summary-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--mc-danger-bg, rgba(192, 57, 43, 0.12));
+  color: var(--mc-danger, #C0392B);
+  border: 1px solid var(--mc-danger-border, rgba(192, 57, 43, 0.4));
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1.5;
 }
 
 /* Header actions: matches McpServers / ToolGuard layout (.section-header__actions
@@ -567,17 +547,36 @@ onMounted(loadGrants)
   color: #991b1b;
 }
 
+/* Scope badge — same family as .severity-badge in shared.css, 4 token-driven
+   color variants for CONVERSATION / AGENT / USER / WORKSPACE. */
+.scope-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.scope-conversation { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
+.scope-agent        { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+.scope-user         { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+.scope-workspace    { background: var(--mc-danger-bg, rgba(192, 57, 43, 0.12));
+                      color: var(--mc-danger, #C0392B); }
 .scope-id {
-  margin-left: 8px;
+  margin-top: 2px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--mc-text-tertiary, #94a3b8);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  background: var(--mc-surface-tertiary, #f1f5f9);
+  background: var(--mc-surface-tertiary, var(--mc-bg-muted, rgba(0, 0, 0, 0.04)));
   padding: 1px 6px;
   border-radius: 3px;
 }
@@ -596,8 +595,29 @@ onMounted(loadGrants)
   font-size: 12px;
 }
 
-.grants-pagination {
-  margin-top: 16px;
+/* Revoked rows: dim out so live rows stay visually dominant. */
+.row-revoked { opacity: 0.55; }
+.row-revoked .scope-badge { filter: grayscale(0.5); }
+
+/* Actions column header sits right-aligned, matches ToolGuard. */
+.col-actions { text-align: center; width: 80px; }
+
+/* This page has more columns than ToolGuard / AuditLogs, so the wrapper needs
+   to allow horizontal scroll on narrow viewports — shared.css uses
+   overflow:hidden which would chop the rightmost columns off. Scoped override
+   only affects this view; the shared style stays untouched. */
+.rules-table-wrapper {
+  overflow-x: auto;
+}
+.rules-table {
+  min-width: 900px;
+}
+
+/* Pagination row — right-aligned beneath the table. McPagination provides
+   its own pill background, so just lay it out. */
+.grants-pagination-row {
+  margin-top: 14px;
+  display: flex;
   justify-content: flex-end;
 }
 

@@ -3824,6 +3824,7 @@ export default {
         manage: '管理自动批准策略...',
       },
       chipLabel: '自动批准已启用 ({count})',
+      chipShort: '自动批准 {count}',
       menu: '自动批准',
       title: '自动批准策略',
       desc: '策略让特定工具调用跳过人审。地板规则（如 rm -rf /、pipe-to-shell）始终生效，CRITICAL 严重度永远人审。',

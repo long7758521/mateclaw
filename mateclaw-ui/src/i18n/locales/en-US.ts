@@ -3732,6 +3732,7 @@ export default {
         manage: 'Manage auto-approve rules...',
       },
       chipLabel: 'Auto-approve active ({count})',
+      chipShort: 'Auto-approve {count}',
       menu: 'Auto-approve',
       title: 'Auto-approve rules',
       desc: 'Rules let specific tool calls skip manual approval. Safety-floor patterns (rm -rf /, pipe-to-shell, etc.) always apply, and CRITICAL severity always falls back to human approval.',
