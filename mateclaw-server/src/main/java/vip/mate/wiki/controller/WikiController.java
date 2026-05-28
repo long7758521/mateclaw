@@ -517,6 +517,38 @@ public class WikiController {
         return R.ok(pageService.getBacklinks(kbId, slug));
     }
 
+    /**
+     * Rename a page within a KB. The old slug is no longer reachable after
+     * this call; every wikilink in the KB that pointed at it is rewritten
+     * to the new slug in the same transaction. Aliases ({@code [[oldSlug|x]]})
+     * are preserved by carrying the alias text over to the new target.
+     */
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "重命名 Wiki 页面，并级联更新所有引用方")
+    @PostMapping("/knowledge-bases/{kbId}/pages/{slug}/rename")
+    public R<Map<String, Object>> renamePage(
+            @PathVariable Long kbId,
+            @PathVariable String slug,
+            @RequestBody Map<String, String> body,
+            @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(kbId, workspaceId);
+        String newSlug = body == null ? null : body.get("newSlug");
+        WikiPageEntity renamed;
+        try {
+            renamed = pageService.rename(kbId, slug, newSlug);
+        } catch (IllegalArgumentException e) {
+            return R.fail(400, e.getMessage());
+        } catch (IllegalStateException e) {
+            return R.fail(409, e.getMessage());
+        }
+        if (renamed == null) return R.fail(404, "Page not found");
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("oldSlug", slug);
+        out.put("newSlug", renamed.getSlug());
+        out.put("pageId", String.valueOf(renamed.getId()));
+        return R.ok(out);
+    }
+
     // ==================== Wikilink lint (broken-link scan) ====================
 
     /**

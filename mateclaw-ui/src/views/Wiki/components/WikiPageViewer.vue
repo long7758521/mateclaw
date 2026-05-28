@@ -205,13 +205,30 @@ async function saveEdit() {
 
 async function handleDelete() {
   if (!store.currentKB || !store.currentPage) return
-  const confirmed = confirm(t('wiki.confirmDelete', { title: store.currentPage.title }))
+  // Surface the referrer count before deletion so the user knows how many
+  // pages will be unlinked in cascade. backlinks already loads on page
+  // open (see the currentPage watcher), so this read is local — no extra
+  // round-trip. The cascade runs on the backend regardless of UI prompt
+  // wording; this is purely advisory.
+  const refCount = backlinks.value.length
+  const baseMessage = t('wiki.confirmDelete', { title: store.currentPage.title })
+  const withRefs = refCount > 0
+    ? `${baseMessage}\n\n${t('wiki.confirmDeleteRefs', { count: refCount })}`
+    : baseMessage
+  const confirmed = confirm(withRefs)
   if (!confirmed) return
   try {
     await wikiApi.deletePage(store.currentKB.id, store.currentPage.slug)
     store.currentPage = null
     // Keep the active raw-material filter so the list doesn't jump to all pages.
-    await store.fetchPages(store.currentKB.id, store.selectedRawId)
+    // Refresh pageRefs + broken-link report too — both can change after a
+    // delete because cascade-rewrite may upgrade or downgrade other pages'
+    // resolution states.
+    await Promise.all([
+      store.fetchPages(store.currentKB.id, store.selectedRawId),
+      store.fetchPageRefs(store.currentKB.id),
+      store.loadBrokenLinksReport(store.currentKB.id),
+    ])
   } catch (e: any) {
     alert(e?.message || 'Delete failed')
   }

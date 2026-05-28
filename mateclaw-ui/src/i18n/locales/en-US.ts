@@ -1990,6 +1990,7 @@ export default {
     selectPage: 'Select a page from the sidebar',
     pageKicker: 'Knowledge Page',
     confirmDelete: 'Delete page "{title}"? This cannot be undone.',
+    confirmDeleteRefs: '{count} pages link to this one — their wikilinks will be rewritten to plain text.',
     confirmBatchDelete: 'Delete {count} pages? This cannot be undone.',
     batchSelect: 'Batch select',
     selectAll: 'Select all',

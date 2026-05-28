@@ -2002,6 +2002,7 @@ export default {
     selectPage: '从左侧选择一个页面查看',
     pageKicker: '知识页面',
     confirmDelete: '确认删除页面「{title}」？此操作不可撤销。',
+    confirmDeleteRefs: '该页面被 {count} 个页面引用，删除后这些引用将被自动改写为纯文本。',
     confirmBatchDelete: '确认删除 {count} 个页面？此操作不可撤销。',
     batchSelect: '批量选择',
     selectAll: '全选',

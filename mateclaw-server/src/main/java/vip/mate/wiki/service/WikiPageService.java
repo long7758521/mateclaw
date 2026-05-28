@@ -7,8 +7,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import vip.mate.audit.service.AuditEventService;
+import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.model.WikiPageEntity;
+import vip.mate.wiki.model.WikiRelationEntity;
 import vip.mate.wiki.repository.WikiPageMapper;
+import vip.mate.wiki.repository.WikiRelationMapper;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -34,6 +38,16 @@ public class WikiPageService {
     private final WikiPageMapper pageMapper;
     private final ObjectMapper objectMapper;
     private final WikiLinkService linkService;
+    // Cascade dependencies — optional via setter so the legacy unit-test
+    // constructor (mapper + ObjectMapper + linkService) still compiles. In
+    // production these are auto-wired through the field setters Lombok
+    // generates from @Setter on Spring's post-construct path.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private WikiRelationMapper relationMapper;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private AuditEventService auditEventService;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private WikiProperties wikiProperties;
 
     private static final Pattern WIKI_LINK_PATTERN = Pattern.compile("\\[\\[([^\\]]+)]]");
 
@@ -527,11 +541,279 @@ public class WikiPageService {
                     kbId, slug, existing.getPageType(), existing.getLocked());
             return;
         }
+
+        // Snapshot the title BEFORE the row goes away. Referrer rewrites
+        // demote `[[slug]]` to plain text using the title as the visible
+        // word; without the snapshot the demotion would fall back to the
+        // raw slug, which reads worse.
+        Long pageId = existing.getId();
+        String snapshotTitle = (existing.getTitle() != null && !existing.getTitle().isBlank())
+                ? existing.getTitle() : slug;
+
+        // Cascade-rewrite every other page that linked to this slug. Feature-
+        // flagged so a hypothetical content-mangling regression has a
+        // production kill-switch; default-on because the legacy behaviour
+        // (just dropping the row) left dangling [[slug]] tokens that this
+        // RFC exists to eliminate.
+        List<Long> affectedReferrers = java.util.Collections.emptyList();
+        boolean cascadeOn = wikiProperties == null || wikiProperties.isCascadeDeleteEnabled();
+        if (cascadeOn) {
+            try {
+                affectedReferrers = cascadeStripReferrers(kbId, pageId, slug, snapshotTitle);
+            } catch (RuntimeException e) {
+                // Don't fail the delete on a referrer-rewrite hiccup — the
+                // page itself coming out is the user's primary intent; lint
+                // will catch any stragglers on the next scan.
+                log.warn("[Wiki] Cascade rewrite failed for slug={} (continuing with delete): {}",
+                        slug, e.toString());
+            }
+        }
+
+        // Defensive relation-cache cleanup. The mate_wiki_relation table is
+        // currently a reserved cache (no production writer today), but we
+        // wipe matching rows anyway so a future writer that populates it
+        // can't strand entries pointing at a deleted page.
+        if (relationMapper != null) {
+            try {
+                relationMapper.delete(
+                        new LambdaQueryWrapper<WikiRelationEntity>()
+                                .eq(WikiRelationEntity::getKbId, kbId)
+                                .and(w -> w.eq(WikiRelationEntity::getPageAId, pageId)
+                                        .or().eq(WikiRelationEntity::getPageBId, pageId)));
+            } catch (RuntimeException e) {
+                log.warn("[Wiki] Failed to purge mate_wiki_relation rows for pageId={}: {}",
+                        pageId, e.toString());
+            }
+        }
+
         pageMapper.delete(
                 new LambdaQueryWrapper<WikiPageEntity>()
                         .eq(WikiPageEntity::getKbId, kbId)
                         .eq(WikiPageEntity::getSlug, slug));
         evictSummaryCache(kbId);
+
+        // Audit event runs after the row is gone so the resourceId reflects
+        // the actual deletion. Async insert means a failing audit log won't
+        // poison the transaction.
+        if (auditEventService != null) {
+            try {
+                String detail = objectMapper.writeValueAsString(java.util.Map.of(
+                        "kbId", kbId,
+                        "slug", slug,
+                        "title", snapshotTitle,
+                        "affectedPageIds", affectedReferrers,
+                        "cascadeEnabled", cascadeOn));
+                auditEventService.record("wiki.page.delete", "wiki_page",
+                        String.valueOf(pageId), snapshotTitle, detail);
+            } catch (Exception e) {
+                log.debug("[Wiki] Audit event emit failed for delete kbId={} slug={}: {}",
+                        kbId, slug, e.toString());
+            }
+        }
+    }
+
+    /**
+     * Walk every page in {@code kbId} that links to {@code targetSlug},
+     * rewrite the wikilink to plain text via the parser, and persist the
+     * referrer with refreshed outgoing_links + broken_links. Returns the
+     * affected page ids so the caller can include them in the audit event.
+     * <p>
+     * Candidate set comes from {@link WikiPageMapper#findReferrersByOutgoingLink}
+     * (a LIKE pre-filter on {@code outgoing_links}). Each candidate is then
+     * verified by re-extracting outlinks from its content — LIKE matches on
+     * the raw JSON column can include false positives if the slug happens
+     * to appear as a substring of another value, so we trust the parser as
+     * the final word.
+     */
+    private List<Long> cascadeStripReferrers(Long kbId, Long deletedPageId,
+                                              String deletedSlug, String snapshotTitle) {
+        // outgoing_links is stored as a JSON array of lowercased strings, so
+        // we wrap with quotes to anchor the match to a full JSON element
+        // rather than any substring match.
+        String slugLower = deletedSlug.toLowerCase(Locale.ROOT);
+        String likePattern = "%\"" + slugLower + "\"%";
+        List<WikiPageEntity> candidates = pageMapper.findReferrersByOutgoingLink(
+                kbId, deletedPageId, likePattern);
+        if (candidates.isEmpty()) return List.of();
+
+        // Pre-compute the active slug set ONCE for the recompute pass — every
+        // referrer's broken_links recompute would otherwise re-trigger the
+        // summary query.
+        Set<String> activeSlugs;
+        try {
+            activeSlugs = linkService.lowercaseSlugSet(listSummaries(kbId));
+        } catch (RuntimeException e) {
+            activeSlugs = java.util.Collections.emptySet();
+        }
+        // The deleted page is, by construction, no longer "active" — remove
+        // its slug from the set so any referrers' broken_links recompute
+        // doesn't accidentally still resolve `[[deletedSlug]]` in their
+        // (now-rewritten) content.
+        if (!activeSlugs.contains(slugLower)) {
+            // already missing — common case
+        } else {
+            Set<String> trimmed = new HashSet<>(activeSlugs);
+            trimmed.remove(slugLower);
+            activeSlugs = trimmed;
+        }
+
+        List<Long> affected = new ArrayList<>(candidates.size());
+        for (WikiPageEntity referrer : candidates) {
+            String originalContent = referrer.getContent();
+            if (originalContent == null) continue;
+            String rewritten = linkService.stripDeletedLink(originalContent, deletedSlug, snapshotTitle);
+            if (rewritten.equals(originalContent)) {
+                // LIKE matched but parser found no real wikilink — pure
+                // false-positive (e.g. slug appeared as substring inside an
+                // alias of an unrelated link). Skip.
+                continue;
+            }
+
+            // Recompute outgoing + broken from the rewritten content, including
+            // the referrer's own slug so any self-links remain non-broken.
+            Set<String> activeForThisReferrer = activeSlugs;
+            if (referrer.getSlug() != null && !referrer.getSlug().isBlank()) {
+                Set<String> withSelf = new HashSet<>(activeSlugs);
+                withSelf.add(referrer.getSlug().toLowerCase(Locale.ROOT));
+                activeForThisReferrer = withSelf;
+            }
+            WikiLinkService.LinkAnalysis a = linkService.analyze(rewritten, activeForThisReferrer);
+
+            WikiPageEntity update = new WikiPageEntity();
+            update.setId(referrer.getId());
+            update.setContent(rewritten);
+            update.setOutgoingLinks(linkService.toJsonArray(a.outgoingLinks()));
+            update.setBrokenLinks(linkService.toJsonArray(a.brokenLinks()));
+            update.setBrokenLinksScannedAt(LocalDateTime.now());
+            pageMapper.updateById(update);
+            affected.add(referrer.getId());
+        }
+        return affected;
+    }
+
+    /**
+     * Rename a page from {@code oldSlug} to {@code newSlug}.
+     * <p>
+     * Updates the page row's slug AND rewrites every referrer's
+     * {@code [[oldSlug]]} (and {@code [[oldSlug|alias]]}) to point at the
+     * new slug, preserving aliases. Both pieces run in the same transaction
+     * so a partial rename can never leave a "page exists at new slug but
+     * referrers still point at old slug" inconsistency.
+     *
+     * @return the renamed page entity, or {@code null} if {@code oldSlug}
+     *         didn't exist
+     * @throws IllegalArgumentException if {@code newSlug} is blank, equals
+     *         the current slug, or collides with another page in the same KB
+     */
+    @Transactional
+    public WikiPageEntity rename(Long kbId, String oldSlug, String newSlug) {
+        if (newSlug == null || newSlug.isBlank()) {
+            throw new IllegalArgumentException("new slug must not be blank");
+        }
+        if (newSlug.equals(oldSlug)) {
+            throw new IllegalArgumentException("new slug equals old slug — no-op");
+        }
+        WikiPageEntity existing = getBySlug(kbId, oldSlug);
+        if (existing == null) return null;
+        if (isProtected(existing)) {
+            throw new IllegalStateException("page is protected (system or locked), refusing to rename");
+        }
+        WikiPageEntity collision = getBySlug(kbId, newSlug);
+        if (collision != null) {
+            throw new IllegalArgumentException("a page with slug '" + newSlug + "' already exists in this KB");
+        }
+
+        Long pageId = existing.getId();
+        // Update the row's own slug first so referrer rewrites that include
+        // a self-link to the same page (rare but possible — e.g. a "see also"
+        // anchor) resolve to the new slug as well.
+        existing.setSlug(newSlug);
+        existing.setUpdateTime(LocalDateTime.now());
+        pageMapper.updateById(existing);
+        evictSummaryCache(kbId);
+
+        List<Long> affected = java.util.Collections.emptyList();
+        boolean cascadeOn = wikiProperties == null || wikiProperties.isCascadeDeleteEnabled();
+        if (cascadeOn) {
+            try {
+                affected = cascadeRenameReferrers(kbId, pageId, oldSlug, newSlug);
+            } catch (RuntimeException e) {
+                log.warn("[Wiki] Cascade rename failed for {}→{} (continuing): {}",
+                        oldSlug, newSlug, e.toString());
+            }
+        }
+
+        if (auditEventService != null) {
+            try {
+                String detail = objectMapper.writeValueAsString(java.util.Map.of(
+                        "kbId", kbId,
+                        "oldSlug", oldSlug,
+                        "newSlug", newSlug,
+                        "affectedPageIds", affected,
+                        "cascadeEnabled", cascadeOn));
+                auditEventService.record("wiki.page.rename", "wiki_page",
+                        String.valueOf(pageId), existing.getTitle(), detail);
+            } catch (Exception e) {
+                log.debug("[Wiki] Audit event emit failed for rename: {}", e.toString());
+            }
+        }
+
+        return existing;
+    }
+
+    /**
+     * Mirror of {@link #cascadeStripReferrers} for the rename path —
+     * replaces {@code [[oldSlug]]} with {@code [[newSlug]]} (preserving the
+     * wikilink form and any alias) instead of demoting to plain text.
+     */
+    private List<Long> cascadeRenameReferrers(Long kbId, Long renamedPageId,
+                                                String oldSlug, String newSlug) {
+        String slugLower = oldSlug.toLowerCase(Locale.ROOT);
+        String likePattern = "%\"" + slugLower + "\"%";
+        List<WikiPageEntity> candidates = pageMapper.findReferrersByOutgoingLink(
+                kbId, renamedPageId, likePattern);
+        if (candidates.isEmpty()) return List.of();
+
+        Set<String> activeSlugs;
+        try {
+            activeSlugs = linkService.lowercaseSlugSet(listSummaries(kbId));
+        } catch (RuntimeException e) {
+            activeSlugs = java.util.Collections.emptySet();
+        }
+        // The renamed page is now under newSlug; oldSlug is gone, newSlug
+        // should resolve. listSummaries has been evicted above so this picks
+        // up the new row when re-queried, but be defensive in case the cache
+        // hasn't repopulated yet.
+        Set<String> activeBase = new HashSet<>(activeSlugs);
+        activeBase.remove(slugLower);
+        activeBase.add(newSlug.toLowerCase(Locale.ROOT));
+        activeSlugs = activeBase;
+
+        List<Long> affected = new ArrayList<>(candidates.size());
+        for (WikiPageEntity referrer : candidates) {
+            String originalContent = referrer.getContent();
+            if (originalContent == null) continue;
+            String rewritten = linkService.renameLink(originalContent, oldSlug, newSlug);
+            if (rewritten.equals(originalContent)) continue;
+
+            Set<String> activeForThisReferrer = activeSlugs;
+            if (referrer.getSlug() != null && !referrer.getSlug().isBlank()) {
+                Set<String> withSelf = new HashSet<>(activeSlugs);
+                withSelf.add(referrer.getSlug().toLowerCase(Locale.ROOT));
+                activeForThisReferrer = withSelf;
+            }
+            WikiLinkService.LinkAnalysis a = linkService.analyze(rewritten, activeForThisReferrer);
+
+            WikiPageEntity update = new WikiPageEntity();
+            update.setId(referrer.getId());
+            update.setContent(rewritten);
+            update.setOutgoingLinks(linkService.toJsonArray(a.outgoingLinks()));
+            update.setBrokenLinks(linkService.toJsonArray(a.brokenLinks()));
+            update.setBrokenLinksScannedAt(LocalDateTime.now());
+            pageMapper.updateById(update);
+            affected.add(referrer.getId());
+        }
+        return affected;
     }
 
     /**
