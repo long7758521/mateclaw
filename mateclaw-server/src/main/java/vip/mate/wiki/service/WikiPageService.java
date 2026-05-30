@@ -368,6 +368,39 @@ public class WikiPageService {
                 .set(WikiPageEntity::getProfileVersion, profileVersion));
     }
 
+    /** Set a page's knowledge layer and depends-on snapshot via a partial update. */
+    public void setLayerAndDependencies(Long pageId, String knowledgeLayer, String dependsOnJson) {
+        if (pageId == null) {
+            return;
+        }
+        pageMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<WikiPageEntity>()
+                .eq(WikiPageEntity::getId, pageId)
+                .set(WikiPageEntity::getKnowledgeLayer, knowledgeLayer)
+                .set(WikiPageEntity::getDependsOnJson, dependsOnJson));
+    }
+
+    /** Mark a batch of pages stale with a shared reason JSON via a partial update. */
+    public int markStale(java.util.Collection<Long> pageIds, String staleReasonJson) {
+        if (pageIds == null || pageIds.isEmpty()) {
+            return 0;
+        }
+        return pageMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<WikiPageEntity>()
+                .in(WikiPageEntity::getId, pageIds)
+                .set(WikiPageEntity::getStale, 1)
+                .set(WikiPageEntity::getStaleReasonJson, staleReasonJson));
+    }
+
+    /** Clear the stale flag on a single page (e.g. after regeneration). */
+    public void clearStale(Long pageId) {
+        if (pageId == null) {
+            return;
+        }
+        pageMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<WikiPageEntity>()
+                .eq(WikiPageEntity::getId, pageId)
+                .set(WikiPageEntity::getStale, 0)
+                .set(WikiPageEntity::getStaleReasonJson, null));
+    }
+
     /**
      * List pages derived from a specific raw material (for UI sidebar filtering).
      * Uses a LIKE search on sourceRawIds JSON field — cheap and dialect-agnostic.
