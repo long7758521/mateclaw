@@ -1,5 +1,6 @@
 package vip.mate.wiki.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +17,9 @@ import vip.mate.workspace.core.annotation.RequireWorkspaceRole;
 import vip.mate.wiki.WikiProperties;
 import vip.mate.wiki.model.WikiKnowledgeBaseEntity;
 import vip.mate.wiki.model.WikiPageEntity;
+import vip.mate.wiki.model.WikiPageTypeProfileEntity;
 import vip.mate.wiki.model.WikiRawMaterialEntity;
+import vip.mate.wiki.profile.WikiPageTypeProfileService;
 import vip.mate.wiki.service.WikiDirectoryScanService;
 import vip.mate.wiki.service.WikiKnowledgeBaseService;
 import vip.mate.wiki.service.WikiLintJobService;
@@ -55,6 +58,8 @@ public class WikiController {
     private final WikiProperties properties;
     private final WikiProgressBus progressBus;
     private final AuditEventService auditEventService;
+    private final WikiPageTypeProfileService pageTypeProfileService;
+    private final ObjectMapper objectMapper;
 
     // ==================== Knowledge Base ====================
 
@@ -186,6 +191,77 @@ public class WikiController {
                                  @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
         verifyKBWorkspace(id, workspaceId);
         kbService.updateConfig(id, body.get("content"));
+        return R.ok();
+    }
+
+    // ==================== PageType Profile ====================
+
+    @RequireWorkspaceRole("viewer")
+    @Operation(summary = "获取知识库 pageType profile（未配置则返回内置默认）")
+    @GetMapping("/knowledge-bases/{id}/page-type-profile")
+    public R<Map<String, Object>> getPageTypeProfile(@PathVariable Long id,
+                                                     @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
+        WikiPageTypeProfileEntity row = pageTypeProfileService.findEnabledRow(id);
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (row != null) {
+            out.put("name", row.getName());
+            out.put("version", row.getVersion());
+            out.put("config", row.getConfigJson());
+            out.put("builtinDefault", false);
+        } else {
+            String json;
+            try {
+                json = objectMapper.writeValueAsString(pageTypeProfileService.getDefaultProfile());
+            } catch (Exception e) {
+                json = "{}";
+            }
+            out.put("name", "default");
+            out.put("version", 0);
+            out.put("config", json);
+            out.put("builtinDefault", true);
+        }
+        return R.ok(out);
+    }
+
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "保存知识库 pageType profile")
+    @PutMapping("/knowledge-bases/{id}/page-type-profile")
+    public R<Void> savePageTypeProfile(@PathVariable Long id, @RequestBody Map<String, String> body,
+                                       @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
+        String config = body.get("config");
+        if (config == null || config.isBlank()) {
+            return R.fail(400, "config is required");
+        }
+        try {
+            pageTypeProfileService.saveProfile(id, body.get("name"), config);
+        } catch (IllegalArgumentException e) {
+            return R.fail(400, e.getMessage());
+        }
+        return R.ok();
+    }
+
+    @RequireWorkspaceRole("member")
+    @Operation(summary = "校验 pageType profile JSON（不保存）")
+    @PostMapping("/knowledge-bases/{id}/page-type-profile/validate")
+    public R<Map<String, Object>> validatePageTypeProfile(@PathVariable Long id, @RequestBody Map<String, String> body,
+                                                          @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
+        List<String> issues = pageTypeProfileService.validateProfileJson(body.getOrDefault("config", ""));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("valid", issues.isEmpty());
+        out.put("issues", issues);
+        return R.ok(out);
+    }
+
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "重置 pageType profile 为内置默认")
+    @PostMapping("/knowledge-bases/{id}/page-type-profile/reset-default")
+    public R<Void> resetPageTypeProfile(@PathVariable Long id,
+                                        @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
+        pageTypeProfileService.resetToDefault(id);
         return R.ok();
     }
 

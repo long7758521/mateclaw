@@ -89,6 +89,98 @@ public class WikiPageTypeProfileService {
         return resolveProfile(kbId).getPageTypes().keySet();
     }
 
+    /** The enabled profile row for a KB, or {@code null} when none configured. */
+    public WikiPageTypeProfileEntity findEnabledRow(Long kbId) {
+        if (kbId == null) {
+            return null;
+        }
+        return profileMapper.selectOne(
+                new LambdaQueryWrapper<WikiPageTypeProfileEntity>()
+                        .eq(WikiPageTypeProfileEntity::getKbId, kbId)
+                        .eq(WikiPageTypeProfileEntity::getEnabled, 1)
+                        .last("LIMIT 1"));
+    }
+
+    /**
+     * Persist a KB profile. Parses {@code configJson} first (rejecting invalid
+     * JSON), then upserts the KB's single enabled row — updating in place and
+     * bumping its version when one exists, else inserting a new enabled row.
+     *
+     * @throws IllegalArgumentException when {@code configJson} does not parse
+     */
+    public void saveProfile(Long kbId, String name, String configJson) {
+        try {
+            objectMapper.readValue(configJson, WikiPageTypeProfile.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid profile config JSON: " + e.getMessage());
+        }
+        WikiPageTypeProfileEntity existing = findEnabledRow(kbId);
+        if (existing != null) {
+            existing.setConfigJson(configJson);
+            if (name != null && !name.isBlank()) {
+                existing.setName(name);
+            }
+            existing.setVersion((existing.getVersion() == null ? 1 : existing.getVersion()) + 1);
+            profileMapper.updateById(existing);
+        } else {
+            WikiPageTypeProfileEntity row = new WikiPageTypeProfileEntity();
+            row.setKbId(kbId);
+            row.setName(name == null || name.isBlank() ? "default" : name);
+            row.setVersion(1);
+            row.setConfigJson(configJson);
+            row.setEnabled(1);
+            profileMapper.insert(row);
+        }
+    }
+
+    /**
+     * Reset a KB to the built-in default by removing its profile rows, so
+     * {@link #resolveProfile} falls back to the default. Logical delete.
+     */
+    public void resetToDefault(Long kbId) {
+        if (kbId == null) {
+            return;
+        }
+        profileMapper.delete(new LambdaQueryWrapper<WikiPageTypeProfileEntity>()
+                .eq(WikiPageTypeProfileEntity::getKbId, kbId));
+    }
+
+    /**
+     * Structurally validate a profile JSON without persisting it. Returns a
+     * list of human-readable issues; empty means valid.
+     */
+    public java.util.List<String> validateProfileJson(String configJson) {
+        java.util.List<String> issues = new java.util.ArrayList<>();
+        WikiPageTypeProfile profile;
+        try {
+            profile = objectMapper.readValue(configJson, WikiPageTypeProfile.class);
+        } catch (Exception e) {
+            issues.add("Invalid JSON: " + e.getMessage());
+            return issues;
+        }
+        if (profile.getPageTypes() == null || profile.getPageTypes().isEmpty()) {
+            issues.add("Profile declares no pageTypes");
+            return issues;
+        }
+        java.util.Set<String> validTypes = java.util.Set.of(
+                "string", "number", "boolean", "date", "enum", "string_array");
+        profile.getPageTypes().forEach((typeName, def) -> {
+            if (def.getSchema() == null) {
+                return;
+            }
+            def.getSchema().forEach((fieldName, fieldSchema) -> {
+                String t = fieldSchema.getType();
+                if (t == null || !validTypes.contains(t.trim().toLowerCase())) {
+                    issues.add(typeName + "." + fieldName + ": unknown field type '" + t + "'");
+                } else if ("enum".equalsIgnoreCase(t.trim())
+                        && (fieldSchema.getValues() == null || fieldSchema.getValues().isEmpty())) {
+                    issues.add(typeName + "." + fieldName + ": enum field declares no values");
+                }
+            });
+        });
+        return issues;
+    }
+
     /**
      * Normalise a routed/created pageType against the KB profile: a declared
      * type is returned as-is (lowercase); an unknown type is downgraded to the
