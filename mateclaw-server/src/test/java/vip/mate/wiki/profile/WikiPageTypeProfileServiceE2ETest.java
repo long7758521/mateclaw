@@ -33,12 +33,16 @@ class WikiPageTypeProfileServiceE2ETest {
     @Autowired
     private WikiPageTypeProfileService service;
 
+    // Persistent file-DB isolation: fresh kb ids per test.
+    private static final java.util.concurrent.atomic.AtomicLong SEQ =
+            new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+
     private static final String EPISODE_JSON =
             "{\"version\":1,\"pageTypes\":{\"episode\":{\"label\":\"Episode\"}}}";
 
     @Test
     void saveThenResolve_roundTrips() {
-        long kb = 5001L;
+        long kb = SEQ.incrementAndGet();
         service.saveProfile(kb, "liquidity", EPISODE_JSON);
 
         WikiPageTypeProfileEntity row = service.findEnabledRow(kb);
@@ -50,7 +54,7 @@ class WikiPageTypeProfileServiceE2ETest {
 
     @Test
     void saveTwice_upsertsInPlaceAndBumpsVersion() {
-        long kb = 5002L;
+        long kb = SEQ.incrementAndGet();
         service.saveProfile(kb, "v1", EPISODE_JSON);
         // Saving again must update the single enabled row, not insert a second
         // (which would violate the one-enabled-per-KB generated-column UNIQUE).
@@ -64,7 +68,7 @@ class WikiPageTypeProfileServiceE2ETest {
 
     @Test
     void resetToDefault_removesRowAndFallsBack() {
-        long kb = 5003L;
+        long kb = SEQ.incrementAndGet();
         service.saveProfile(kb, "custom", EPISODE_JSON);
         assertNotNull(service.findEnabledRow(kb));
 
@@ -79,7 +83,7 @@ class WikiPageTypeProfileServiceE2ETest {
     @Test
     void invalidConfig_isRejectedOnSave() {
         try {
-            service.saveProfile(5004L, "bad", "{ not json");
+            service.saveProfile(SEQ.incrementAndGet(), "bad", "{ not json");
             org.junit.jupiter.api.Assertions.fail("expected IllegalArgumentException");
         } catch (IllegalArgumentException expected) {
             // ok

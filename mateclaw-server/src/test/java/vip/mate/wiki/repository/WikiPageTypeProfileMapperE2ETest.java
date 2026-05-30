@@ -32,6 +32,15 @@ class WikiPageTypeProfileMapperE2ETest {
     @Autowired
     private WikiPageTypeProfileMapper mapper;
 
+    // The test H2 is a persistent file DB shared across runs, so each test
+    // uses fresh kb ids to stay isolated from earlier runs' rows.
+    private static final java.util.concurrent.atomic.AtomicLong SEQ =
+            new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+
+    private long uniqueKb() {
+        return SEQ.incrementAndGet();
+    }
+
     private WikiPageTypeProfileEntity profile(long kbId, String name, int enabled) {
         WikiPageTypeProfileEntity p = new WikiPageTypeProfileEntity();
         p.setKbId(kbId);
@@ -46,40 +55,43 @@ class WikiPageTypeProfileMapperE2ETest {
 
     @Test
     void insertsAndReadsBack() {
-        WikiPageTypeProfileEntity p = profile(9001L, "default", 1);
+        long kb = uniqueKb();
+        WikiPageTypeProfileEntity p = profile(kb, "default", 1);
         mapper.insert(p);
         assertNotNull(p.getId());
         WikiPageTypeProfileEntity loaded = mapper.selectById(p.getId());
         assertEquals("default", loaded.getName());
-        assertEquals(9001L, loaded.getKbId());
+        assertEquals(kb, loaded.getKbId());
     }
 
     @Test
     void secondEnabledProfileForSameKb_isRejected() {
-        mapper.insert(profile(9002L, "default", 1));
+        long kb = uniqueKb();
+        mapper.insert(profile(kb, "default", 1));
         // A different name but also enabled for the same KB must violate the
         // generated-column UNIQUE (one enabled profile per KB).
-        assertThrows(Exception.class, () -> mapper.insert(profile(9002L, "regulation", 1)));
+        assertThrows(Exception.class, () -> mapper.insert(profile(kb, "regulation", 1)));
     }
 
     @Test
     void multipleDisabledProfilesForSameKb_coexist() {
-        mapper.insert(profile(9003L, "default", 1));
+        long kb = uniqueKb();
+        mapper.insert(profile(kb, "default", 1));
         // enabled=0 rows yield NULL in the generated column and are exempt from
         // the unique check, so several may coexist.
-        mapper.insert(profile(9003L, "draft-a", 0));
-        mapper.insert(profile(9003L, "draft-b", 0));
+        mapper.insert(profile(kb, "draft-a", 0));
+        mapper.insert(profile(kb, "draft-b", 0));
         long count = mapper.selectCount(
                 com.baomidou.mybatisplus.core.toolkit.Wrappers
                         .<WikiPageTypeProfileEntity>lambdaQuery()
-                        .eq(WikiPageTypeProfileEntity::getKbId, 9003L));
+                        .eq(WikiPageTypeProfileEntity::getKbId, kb));
         assertEquals(3, count);
     }
 
     @Test
     void enabledProfilesInDifferentKbs_coexist() {
-        mapper.insert(profile(9101L, "default", 1));
-        mapper.insert(profile(9102L, "default", 1));
+        mapper.insert(profile(uniqueKb(), "default", 1));
+        mapper.insert(profile(uniqueKb(), "default", 1));
         assertTrue(true); // no exception thrown — different KBs are independent
     }
 }

@@ -28,9 +28,13 @@ class WikiPageMetadataE2ETest {
     @Autowired
     private WikiPageService pageService;
 
+    // Persistent file-DB isolation: fresh kb ids per test.
+    private static final java.util.concurrent.atomic.AtomicLong SEQ =
+            new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+
     @Test
     void applyMetadata_persistsColumns_withoutTouchingContent() {
-        long kb = 6001L;
+        long kb = SEQ.incrementAndGet();
         WikiPageEntity page = pageService.createPage(kb, "episode-x", "Episode X",
                 "## Body\n\noriginal content", "summary", "[1]", "episode");
         assertNotNull(page.getId());
@@ -49,7 +53,7 @@ class WikiPageMetadataE2ETest {
 
     @Test
     void applyMetadata_warningStatusAndJson() {
-        long kb = 6002L;
+        long kb = SEQ.incrementAndGet();
         WikiPageEntity page = pageService.createPage(kb, "episode-y", "Episode Y",
                 "body", "summary", "[1]", "episode");
 
