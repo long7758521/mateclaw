@@ -47,6 +47,11 @@ public class WikiSourcePathValidator {
         Path resolved = canonicalize(Paths.get(rawPath));
         List<String> roots = properties.getAllowedSourceRoots();
         if (roots == null || roots.isEmpty()) {
+            if (properties.isRequireAllowedRoots()) {
+                throw new IllegalArgumentException(
+                        "No allowed source roots are configured; refusing the path (fail-closed). "
+                        + "Set mate.wiki.allowed-source-roots to permit directories.");
+            }
             return resolved;
         }
         for (String root : roots) {

@@ -81,6 +81,16 @@ public class WikiProperties {
     private java.util.List<String> allowedSourceRoots = new java.util.ArrayList<>();
 
     /**
+     * Fail-closed switch for source-path validation. When {@code true} and
+     * {@link #allowedSourceRoots} is empty, every source directory is rejected
+     * (no path is allowed until a root is configured) — recommended for
+     * multi-tenant servers so a missing allow-list cannot silently re-open
+     * full-filesystem reads. Default {@code false} keeps the opt-in behaviour
+     * for desktop / single-tenant where no roots are configured.
+     */
+    private boolean requireAllowedRoots = false;
+
+    /**
      * When {@code true}, a scheduled job (single-owner via ShedLock) scans each
      * KB's configured source directory and auto-ingests new files. Off by
      * default — operators opt in. Existing dedup by source path keeps re-scans

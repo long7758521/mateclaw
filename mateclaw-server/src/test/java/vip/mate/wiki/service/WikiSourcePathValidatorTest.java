@@ -27,6 +27,12 @@ class WikiSourcePathValidatorTest {
         return new WikiSourcePathValidator(props);
     }
 
+    private WikiSourcePathValidator failClosedValidator() {
+        WikiProperties props = new WikiProperties();
+        props.setRequireAllowedRoots(true);
+        return new WikiSourcePathValidator(props);
+    }
+
     @Test
     void blankPath_rejected() {
         assertThrows(IllegalArgumentException.class, () -> validator(List.of()).validateDirectory(" "));
@@ -36,6 +42,13 @@ class WikiSourcePathValidatorTest {
     void emptyRoots_allowAnyPath(@TempDir Path tmp) throws IOException {
         Path resolved = validator(List.of()).validateDirectory(tmp.toString());
         assertEquals(tmp.toRealPath(), resolved);
+    }
+
+    @Test
+    void emptyRoots_failClosed_rejectsEverything(@TempDir Path tmp) {
+        // With require-allowed-roots enabled, an empty allow-list denies all.
+        assertThrows(IllegalArgumentException.class,
+                () -> failClosedValidator().validateDirectory(tmp.toString()));
     }
 
     @Test
