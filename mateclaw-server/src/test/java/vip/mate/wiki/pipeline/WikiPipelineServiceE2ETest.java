@@ -2,14 +2,13 @@ package vip.mate.wiki.pipeline;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.test.annotation.DirtiesContext;
 import vip.mate.wiki.model.WikiPipelineDefinitionEntity;
 import vip.mate.wiki.model.WikiPipelineStepRunEntity;
+import vip.mate.wiki.repository.WikiPipelineRunMapper;
 import vip.mate.wiki.repository.WikiPipelineStepRunMapper;
 
 import java.time.LocalDateTime;
@@ -34,36 +33,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
                 "mateclaw.feature-flag.refresh-ms=999999"
         }
 )
-@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class WikiPipelineServiceE2ETest {
 
-    /** Stub executors: 'echo' returns a marker; 'boom' always throws. */
-    @TestConfiguration
-    static class StubExecutors {
-        @Bean
-        WikiStepExecutor echoExecutor() {
-            return new WikiStepExecutor() {
-                public String type() { return "echo"; }
-                public String execute(WikiStepContext c) {
-                    return "echo:" + c.stepId() + ":" + (c.previousOutput() == null ? "" : c.previousOutput());
-                }
-            };
+    // Stub executors: 'echo' returns a marker; 'boom' always throws. Built
+    // here (not via @TestConfiguration) so the test uses the shared default
+    // context and does not fork a separate datasource that @DirtiesContext
+    // would close out from under sibling tests.
+    private static final WikiStepExecutor ECHO = new WikiStepExecutor() {
+        public String type() { return "echo"; }
+        public String execute(WikiStepContext c) {
+            return "echo:" + c.stepId() + ":" + (c.previousOutput() == null ? "" : c.previousOutput());
         }
-        @Bean
-        WikiStepExecutor boomExecutor() {
-            return new WikiStepExecutor() {
-                public String type() { return "boom"; }
-                public String execute(WikiStepContext c) throws Exception { throw new RuntimeException("kaboom"); }
-            };
-        }
-    }
+    };
+    private static final WikiStepExecutor BOOM = new WikiStepExecutor() {
+        public String type() { return "boom"; }
+        public String execute(WikiStepContext c) { throw new RuntimeException("kaboom"); }
+    };
 
     @Autowired
-    private WikiPipelineService pipelineService;
+    private WikiPipelineRunMapper runMapper;
     @Autowired
     private WikiPipelineStepRunMapper stepRunMapper;
     @Autowired
     private ObjectMapper objectMapper;
+
+    private WikiPipelineService pipelineService;
+
+    @BeforeEach
+    void setUp() {
+        pipelineService = new WikiPipelineService(runMapper, stepRunMapper, objectMapper, List.of(ECHO, BOOM));
+    }
 
     private static final java.util.concurrent.atomic.AtomicLong SEQ =
             new java.util.concurrent.atomic.AtomicLong(System.nanoTime());

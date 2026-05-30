@@ -3,7 +3,6 @@ package vip.mate.wiki.service;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.annotation.DirtiesContext;
 import vip.mate.wiki.model.WikiPageEntity;
 
 import java.util.List;
@@ -25,7 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
                 "mateclaw.feature-flag.refresh-ms=999999"
         }
 )
-@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class WikiDependencyServiceE2ETest {
 
     @Autowired

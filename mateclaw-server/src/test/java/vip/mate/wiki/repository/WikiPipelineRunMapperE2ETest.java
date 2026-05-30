@@ -3,7 +3,6 @@ package vip.mate.wiki.repository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.annotation.DirtiesContext;
 import vip.mate.wiki.model.WikiPipelineRunEntity;
 
 import java.time.LocalDateTime;
@@ -24,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
                 "mateclaw.feature-flag.refresh-ms=999999"
         }
 )
-@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class WikiPipelineRunMapperE2ETest {
 
     @Autowired
