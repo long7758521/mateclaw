@@ -87,6 +87,32 @@ public class WikiRawMaterialService {
     }
 
     /**
+     * Import a text file discovered by a directory scan, detecting content
+     * changes by hash: unchanged content (a raw with the same hash already
+     * exists) is a no-op, while changed content creates a new raw and triggers
+     * processing — so a modified file is re-ingested rather than silently
+     * skipped. The originating path is recorded for diagnostics.
+     *
+     * @return {@code true} when the file was newly ingested (new or changed
+     *         content), {@code false} when skipped as unchanged
+     */
+    public boolean ingestTextFileFromScan(Long kbId, String fileName, String absolutePath, String content) {
+        String hash = computeHash(content);
+        WikiRawMaterialEntity sameContent = rawMapper.selectOne(
+                new LambdaQueryWrapper<WikiRawMaterialEntity>()
+                        .eq(WikiRawMaterialEntity::getKbId, kbId)
+                        .eq(WikiRawMaterialEntity::getContentHash, hash)
+                        .last("LIMIT 1"));
+        // addText dedups internally by hash, so this reuses sameContent when
+        // unchanged and inserts + triggers processing when the content differs.
+        WikiRawMaterialEntity raw = addText(kbId, fileName, content);
+        if (raw != null) {
+            updateSourcePath(raw.getId(), absolutePath);
+        }
+        return sameContent == null;
+    }
+
+    /**
      * Record the originating file path on a raw material via a partial update,
      * so a later directory re-scan can dedup it by source path. Used for
      * text-file imports, which otherwise carry no path.

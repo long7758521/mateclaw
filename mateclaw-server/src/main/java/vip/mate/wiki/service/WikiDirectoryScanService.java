@@ -137,32 +137,36 @@ public class WikiDirectoryScanService {
                 String fileName = file.getFileName().toString();
                 String ext = getExtension(fileName);
 
-                // 基于 sourcePath 去重
+                if (TEXT_EXTENSIONS.contains(ext)) {
+                    // Text files: dedup by content hash, so an unchanged file is
+                    // skipped while a modified file (new hash) is re-ingested.
+                    String content = Files.readString(file, StandardCharsets.UTF_8);
+                    boolean fresh = rawService.ingestTextFileFromScan(kbId, fileName, absolutePath, content);
+                    if (fresh) {
+                        added++;
+                    } else {
+                        skipped++;
+                    }
+                    continue;
+                }
+
+                // Binary files: dedup by source path. Re-ingest on content change
+                // is not detected here (hashing large binaries each scan is
+                // expensive) — modified binaries should be re-uploaded explicitly.
                 WikiRawMaterialEntity existing = rawService.findBySourcePath(kbId, absolutePath);
                 if (existing != null) {
                     skipped++;
                     continue;
                 }
-
-                if (TEXT_EXTENSIONS.contains(ext)) {
-                    // 文本文件：读取内容；记录 source path 以便重复扫描去重
-                    String content = Files.readString(file, StandardCharsets.UTF_8);
-                    WikiRawMaterialEntity textRaw = rawService.addText(kbId, fileName, content);
-                    if (textRaw != null) {
-                        rawService.updateSourcePath(textRaw.getId(), absolutePath);
-                    }
-                } else {
-                    // 二进制文件：直接引用原始路径，不复制
-                    String sourceType = switch (ext) {
-                        case "pdf" -> "pdf";
-                        case "docx", "doc" -> "docx";
-                        case "pptx", "ppt" -> "pptx";
-                        case "xlsx", "xls" -> "xlsx";
-                        case "html", "htm" -> "html";
-                        default -> "text";
-                    };
-                    rawService.addFile(kbId, fileName, sourceType, absolutePath, Files.size(file));
-                }
+                String sourceType = switch (ext) {
+                    case "pdf" -> "pdf";
+                    case "docx", "doc" -> "docx";
+                    case "pptx", "ppt" -> "pptx";
+                    case "xlsx", "xls" -> "xlsx";
+                    case "html", "htm" -> "html";
+                    default -> "text";
+                };
+                rawService.addFile(kbId, fileName, sourceType, absolutePath, Files.size(file));
                 added++;
 
             } catch (Exception e) {

@@ -54,6 +54,14 @@ class WikiSourceWatcherServiceE2ETest {
         Files.writeString(sourceDir.resolve("note-c.md"), "# Note C\n\ncontent c");
         int secondAdded = watcherService.runScanCycle();
         assertEquals(1, secondAdded, "only the newly added file should ingest");
+
+        // Re-scanning with no changes ingests nothing.
+        assertEquals(0, watcherService.runScanCycle(), "unchanged files must not re-ingest");
+
+        // Modifying an existing file's content re-ingests it (content hash changed).
+        Files.writeString(sourceDir.resolve("note-a.md"), "# Note A\n\nEDITED content a");
+        int afterEdit = watcherService.runScanCycle();
+        assertEquals(1, afterEdit, "a modified file must be re-ingested");
     }
 
     @Test
