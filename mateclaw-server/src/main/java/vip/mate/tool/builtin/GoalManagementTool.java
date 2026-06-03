@@ -146,10 +146,14 @@ public class GoalManagementTool {
     }
 
     @Tool(description = """
-            Explicitly mark the active goal as completed. Use ONLY when all \
-            exit criteria are satisfied (e.g. tests passed, feature deployed, \
-            user confirmed). The runtime evaluator will also mark goals \
-            completed automatically when score >= 0.95 — prefer that path.""")
+            Explicitly mark the active goal as completed. Use ONLY when EVERY \
+            checklist criterion is genuinely satisfied with concrete evidence \
+            in the conversation (e.g. tests actually passed, feature actually \
+            deployed, user confirmed). Do NOT call this to close out work that \
+            is unfinished, blocked, or impossible. In normal operation you do \
+            not need this tool at all: the runtime evaluator marks the goal \
+            completed automatically once all checklist criteria pass — prefer \
+            that path and just keep working.""")
     public String completeGoal(@Nullable ToolContext ctx) {
         if (!properties.isEnabled()) return errorJson("Goal subsystem is disabled");
         GoalEntity goal = resolveActive(ctx);

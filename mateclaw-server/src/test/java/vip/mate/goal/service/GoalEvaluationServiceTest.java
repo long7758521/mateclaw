@@ -12,6 +12,8 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.evaluation.EvaluationRequest;
+import org.springframework.ai.evaluation.EvaluationResponse;
 import org.springframework.retry.support.RetryTemplate;
 import vip.mate.goal.config.GoalProperties;
 import vip.mate.goal.model.GoalEntity;
@@ -188,7 +190,8 @@ class GoalEvaluationServiceTest {
         stubChatResponse("I think it's about 60% done.");
         GoalEvaluationResult r = svc.evaluate(goal(), List.of(), "x");
         assertEquals(GoalEvaluationResult.DECISION_FALLBACK, r.decision());
-        assertEquals(0, r.llmCallsConsumed());
+        // The call was made and returned garbage — it still spends one call.
+        assertEquals(1, r.llmCallsConsumed());
     }
 
     @Test
@@ -248,5 +251,55 @@ class GoalEvaluationServiceTest {
         assertEquals(0, r.llmCallsConsumed());
         assertFalse(r.completed());
         assertTrue(r.gap().contains("evaluator unavailable"));
+    }
+
+    // ==================== Post-call billing (failed output still spends a call) ====================
+
+    @Test
+    void emptyResponseAfterCall_billsOneLlmCall() {
+        stubChatResponse("   ");
+        GoalEvaluationResult r = svc.evaluate(goal(), List.of(), "x");
+        assertEquals(GoalEvaluationResult.DECISION_FALLBACK, r.decision());
+        assertEquals(1, r.llmCallsConsumed(), "a spent-but-empty evaluator call must charge 1");
+        assertEquals("qwen-turbo", r.evaluatorModel());
+    }
+
+    @Test
+    void parseFailureAfterCall_billsOneLlmCall() {
+        stubChatResponse("{\"criteria\": }");  // malformed -> parse fail (call already spent)
+        GoalEvaluationResult r = svc.evaluate(goal(), List.of(), "x");
+        assertEquals(GoalEvaluationResult.DECISION_FALLBACK, r.decision());
+        assertEquals(1, r.llmCallsConsumed());
+    }
+
+    // ==================== Bootstrap criteria cap ====================
+
+    @Test
+    void bootstrap_capsCriteriaAtMax() {
+        StringBuilder sb = new StringBuilder("{\"criteria\":[");
+        for (int i = 0; i < 12; i++) {
+            if (i > 0) sb.append(',');
+            sb.append("{\"text\":\"criterion ").append(i).append("\"}");
+        }
+        sb.append("]}");
+        stubChatResponse(sb.toString());
+        GoalEvaluationResult r = svc.evaluate(goal(), List.of(), "x");
+        assertNotNull(r.bootstrapCriteria());
+        assertTrue(r.bootstrapCriteria().size() <= 8,
+                "bootstrap must cap criteria at MAX_BOOTSTRAP_CRITERIA; got " + r.bootstrapCriteria().size());
+    }
+
+    // ==================== Evaluator SPI ====================
+
+    @Test
+    void evaluatorSpi_judgesResponseInVerdictMode() {
+        // The objective is wrapped as criterion C1; a verdict JSON marking C1
+        // passed must surface as isPass()=true with score 1.0 — NOT a bootstrap.
+        stubChatResponse("{\"criterionVerdicts\":[{\"id\":\"C1\",\"passed\":true,\"evidence\":\"matches\"}],\"summary\":\"ok\"}");
+        EvaluationResponse resp = svc.evaluate(
+                new EvaluationRequest("Return a greeting", "Hello, world!"));
+        assertTrue(resp.isPass());
+        assertEquals(1.0f, resp.getScore(), 1e-6);
+        assertTrue(resp.getMetadata().containsKey("criterionVerdicts"));
     }
 }

@@ -43,13 +43,25 @@ public record GoalEvaluationResult(
     public static final String DECISION_CONTINUE = "continue";
     public static final String DECISION_FALLBACK = "fallback";
 
-    /** Failure fallback used when the evaluator LLM call errors out.
-     *  Does NOT charge eval_llm_calls_used. */
+    /** Failure fallback for the "no call was made" cases (no goal, empty
+     *  answer, no model). Does NOT charge eval_llm_calls_used. */
     public static GoalEvaluationResult fallback(String reason) {
         return new GoalEvaluationResult(
                 0.0, "evaluator unavailable: " + reason,
                 DECISION_FALLBACK, false,
                 "", 0, 0L,
+                List.of(), null);
+    }
+
+    /** Failure fallback for cases where the evaluator LLM call already
+     *  succeeded but its output was unusable (empty / unparseable). The call
+     *  was really spent, so it charges {@code llmCallsConsumed = 1} and
+     *  records the model + latency for accurate budget accounting. */
+    public static GoalEvaluationResult fallbackAfterCall(String reason, String model, long latencyMs) {
+        return new GoalEvaluationResult(
+                0.0, "evaluator unavailable: " + reason,
+                DECISION_FALLBACK, false,
+                model == null ? "" : model, 1, latencyMs,
                 List.of(), null);
     }
 

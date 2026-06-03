@@ -145,7 +145,8 @@ public class GoalEvaluationService implements Evaluator {
             String body = extractText(response);
             if (body == null || body.isBlank()) {
                 log.warn("[GoalEvaluation] empty response from evaluator model={}", model.getModelName());
-                return GoalEvaluationResult.fallback("empty_response");
+                // The call was really spent — bill it.
+                return GoalEvaluationResult.fallbackAfterCall("empty_response", model.getModelName(), elapsed);
             }
 
             return bootstrap
@@ -162,24 +163,31 @@ public class GoalEvaluationService implements Evaluator {
 
     /**
      * Generic SPI surface: judge whether {@code request.getResponseContent()}
-     * satisfies the objective in {@code request.getUserText()}. Used for
-     * standardization/testing; goal-aware callers use the
-     * {@link #evaluate(GoalEntity, List, String)} overload which carries the
-     * checklist context the request cannot. Detail rides in metadata.
+     * satisfies the objective stated in {@code request.getUserText()}.
+     *
+     * <p>The objective is wrapped as a single checklist criterion so the call
+     * runs in <b>verdict</b> mode (a real pass/fail judgement of the response),
+     * not bootstrap mode. {@code isPass()} is true only when that criterion is
+     * satisfied; detail rides in {@code metadata.criterionVerdicts}.
+     *
+     * <p>Goal-aware callers use the {@link #evaluate(GoalEntity, List, String)}
+     * overload, which carries the full multi-criterion checklist context the
+     * generic request cannot.
      */
     @Override
     public EvaluationResponse evaluate(EvaluationRequest request) {
+        String objective = request.getUserText() != null ? request.getUserText() : "";
         GoalEntity probe = new GoalEntity();
-        probe.setTitle(request.getUserText());
-        probe.setDescription("");
+        probe.setTitle("Does the response satisfy the objective?");
+        probe.setDescription(objective);
+        // One criterion = the objective -> non-empty criteria -> verdict mode.
+        probe.setCriteria(GoalCriteriaCodec.serialize(
+                List.of(new GoalCriterion("C1", objective, false, "")), objectMapper));
+
         GoalEvaluationResult r = evaluate(probe, List.of(), request.getResponseContent());
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("decision", r.decision());
-        if (r.bootstrapCriteria() != null) {
-            metadata.put("bootstrapCriteria", r.bootstrapCriteria());
-        } else {
-            metadata.put("criterionVerdicts", r.criterionVerdicts());
-        }
+        metadata.put("criterionVerdicts", r.criterionVerdicts());
         return new EvaluationResponse(r.completed(), (float) r.score(),
                 r.gap() == null ? "" : r.gap(), metadata);
     }
@@ -267,16 +275,21 @@ public class GoalEvaluationService implements Evaluator {
         try {
             GoalCriteriaDraft dto = draftConverter.convert(stripFences(body));
             if (dto == null || dto.criteria() == null || dto.criteria().isEmpty()) {
-                return GoalEvaluationResult.fallback("bootstrap_empty");
+                return GoalEvaluationResult.fallbackAfterCall("bootstrap_empty", modelName, latencyMs);
             }
             List<GoalCriterion> normalized = new ArrayList<>();
             for (GoalCriterion c : dto.criteria()) {
                 if (c != null && c.text() != null && !c.text().isBlank()) {
                     normalized.add(new GoalCriterion("", c.text().trim(), false, ""));
                 }
+                // Hard cap regardless of what the model returned — the prompt
+                // asks for <= MAX but a verbose model could exceed it.
+                if (normalized.size() >= MAX_BOOTSTRAP_CRITERIA) {
+                    break;
+                }
             }
             if (normalized.isEmpty()) {
-                return GoalEvaluationResult.fallback("bootstrap_empty");
+                return GoalEvaluationResult.fallbackAfterCall("bootstrap_empty", modelName, latencyMs);
             }
             normalized = GoalCriteriaCodec.reindex(normalized);
             // Bootstrap never judges completion: the checklist is freshly created.
@@ -286,7 +299,7 @@ public class GoalEvaluationService implements Evaluator {
                     List.of(), normalized);
         } catch (Exception e) {
             log.warn("[GoalEvaluation] bootstrap parse failed: {}", e.getMessage());
-            return GoalEvaluationResult.fallback("parse_failed");
+            return GoalEvaluationResult.fallbackAfterCall("parse_failed", modelName, latencyMs);
         }
     }
 
@@ -314,7 +327,7 @@ public class GoalEvaluationService implements Evaluator {
                     deltas, null);
         } catch (Exception e) {
             log.warn("[GoalEvaluation] verdict parse failed: {}", e.getMessage());
-            return GoalEvaluationResult.fallback("parse_failed");
+            return GoalEvaluationResult.fallbackAfterCall("parse_failed", modelName, latencyMs);
         }
     }
 

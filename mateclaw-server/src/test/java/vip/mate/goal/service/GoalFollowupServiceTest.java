@@ -75,11 +75,14 @@ class GoalFollowupServiceTest {
     }
 
     @Test
-    void highScore_returnsEmpty() {
+    void highScoreButStillContinue_followsUp() {
+        // No score gate: completion is decided by decision==completed, not a
+        // numeric threshold. A 20/21 goal (score ~0.95) that is still "continue"
+        // has remaining criteria and MUST follow up.
         Optional<String> out = svc.maybeBuildFollowup(
                 goal(true),
                 res(0.96, GoalEvaluationResult.DECISION_CONTINUE));
-        assertTrue(out.isEmpty());
+        assertTrue(out.isPresent());
     }
 
     @Test

@@ -37,7 +37,7 @@ public class GoalFollowupService {
      *   <li>{@code allow-auto-followup} runtime hard gate (operator kill
      *       switch; overrides per-goal flag).</li>
      *   <li>Per-goal {@code autoFollowupEnabled}.</li>
-     *   <li>Evaluator decision is "continue" with score &lt; 0.95.</li>
+     *   <li>Evaluator decision is "continue" (not all criteria passed).</li>
      *   <li>Cooldown since the last follow-up has elapsed.</li>
      *   <li>turn_budget has at least one slot left after this turn.</li>
      *   <li>(agent + eval) LLM calls below 90% of llm_call_budget.</li>
@@ -49,10 +49,13 @@ public class GoalFollowupService {
         // Runtime hard gate first — overrides any per-goal flag.
         if (!properties.isAllowAutoFollowup()) return Optional.empty();
         if (!Boolean.TRUE.equals(goal.getAutoFollowupEnabled())) return Optional.empty();
+        // Completion is deterministic now: the evaluator sets decision=completed
+        // only when every checklist criterion passed. Anything still "continue"
+        // has remaining work regardless of the numeric score, so there is no
+        // score threshold here — a 20/21 goal (score 0.95) must still follow up.
         if (!GoalEvaluationResult.DECISION_CONTINUE.equals(result.decision())) {
             return Optional.empty();
         }
-        if (result.score() >= 0.95) return Optional.empty();
 
         // Cooldown — last_followup_at recorded by recordFollowupInjected().
         Integer cooldownSec = goal.getFollowupCooldownSeconds();

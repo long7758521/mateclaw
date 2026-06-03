@@ -1316,8 +1316,8 @@ export interface Goal {
   lastFollowupAt?: string | null
   createTime: string
   updateTime: string
-  /** Parsed checklist; always an array on the wire (empty when none). */
-  criteria?: GoalCriterion[]
+  /** Parsed checklist; the backend always sends an array (empty when none). */
+  criteria: GoalCriterion[]
 }
 
 export interface GoalEvent {
