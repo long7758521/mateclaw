@@ -500,7 +500,7 @@ const textTitle = ref('')
 const textContent = ref('')
 const dirPath = ref(store.currentKB?.sourceDirectory || '')
 const scanning = ref(false)
-const scanResult = ref<{ scanned: number; added: number; skipped: number } | null>(null)
+const scanResult = ref<{ scanned: number; added: number; skipped: number; errors?: string[] } | null>(null)
 
 // ─── Drag-over state ──────────────────────────────────────────────────────────
 const { isDragging, onDragEnter, onDragLeave, onDrop: handleDrop } = useFileDrop(uploadDroppedFiles)
