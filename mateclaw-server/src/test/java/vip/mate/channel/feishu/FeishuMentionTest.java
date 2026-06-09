@@ -132,6 +132,22 @@ class FeishuMentionTest {
                 new MentionEvent[]{mentionEvent(alias)}, chatB, "m3", BOT_ID, null));
     }
 
+    @Test
+    void learning_coMentionedHumanNotLearnedAsAlias() {
+        FeishuChannelAdapter adapter = newAdapter();
+        String human = "ou_human_alice";
+        String chatA = "oc_chatA";
+
+        // @bot @alice 在同一次投递：bot 用全局身份命中（返回 true），
+        // 但被同时 @ 的人不能被学成 bot 别名。
+        assertTrue(adapter.detectBotMentionWithLearning(
+                new MentionEvent[]{mentionEvent(BOT_ID), mentionEvent(human)}, chatA, "m_co", BOT_ID, null));
+
+        // 之后只 @ 那个人的消息，绝不能被误判为 @bot。
+        assertFalse(adapter.detectBotMentionWithLearning(
+                new MentionEvent[]{mentionEvent(human)}, chatA, "m_human", BOT_ID, null));
+    }
+
     // ==================== mention tracker TTL ====================
 
     @Test

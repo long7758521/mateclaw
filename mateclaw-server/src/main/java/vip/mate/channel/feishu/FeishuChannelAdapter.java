@@ -94,11 +94,17 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
      */
     private final ConcurrentHashMap<String, Set<String>> chatBotAliases = new ConcurrentHashMap<>();
 
+    /** Max learned aliases retained per chat, to bound memory on busy groups. */
+    private static final int CHAT_ALIAS_MAX = 64;
+
     /**
      * Per-messageId mention tracker（带 TTL）。
      * <p>飞书 SDK 经常对同一条消息双投递：一份 mentions 含 bot 的<em>全局身份</em>（来自 /bot/v3/info），
-     * 另一份含 bot 的<em>群内别名</em>。我们累积同一 messageId 下所有投递看到的 mention 标识，
-     * 一旦其中任何一份被识别为 @bot，就把累积的全部标识写入 {@link #chatBotAliases}。
+     * 另一份含 bot 的<em>群内别名</em>。我们累积同一 messageId 下<em>单 mention</em>投递看到的标识，
+     * 一旦其中任何一份被识别为 @bot，就把累积的标识写入 {@link #chatBotAliases}。
+     * <p>只累积单 mention 投递是有意为之：多 mention 投递（如 {@code @bot @某人}）会把 bot 与
+     * 被同时 @ 的人混在一起，无法区分，若整体学习会把人误学成 bot 别名，导致之后 @ 该人的消息
+     * 被误判为 @bot。而飞书双投递里 bot 别名那一份本身就是单 mention，所以这样既安全又不丢功能。
      */
     private final ConcurrentHashMap<String, MentionTrack> mentionTracker = new ConcurrentHashMap<>();
 
@@ -720,7 +726,13 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         MentionTrack track = null;
         if (messageId != null) {
             track = mentionTracker.computeIfAbsent(messageId, k -> new MentionTrack());
-            collectMentionIdentifiers(mentions, track.seenIds);
+            // Only single-mention deliveries are unambiguous bot identities. A
+            // multi-mention delivery (e.g. @bot @alice) mixes the bot with
+            // co-mentioned humans that must NOT be learned as aliases; Feishu's
+            // dual-delivery alias form is itself a single mention, so this is safe.
+            if (mentions.length == 1) {
+                collectMentionIdentifiers(mentions, track.seenIds);
+            }
         }
 
         // 1. 直接匹配 bot 的全局身份
@@ -754,6 +766,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
     private void learnFromTrack(String chatId, MentionTrack track) {
         if (chatId == null || track == null || track.seenIds.isEmpty()) return;
         Set<String> aliases = chatBotAliases.computeIfAbsent(chatId, k -> ConcurrentHashMap.newKeySet());
+        if (aliases.size() >= CHAT_ALIAS_MAX) return;
         int before = aliases.size();
         aliases.addAll(track.seenIds);
         int added = aliases.size() - before;
