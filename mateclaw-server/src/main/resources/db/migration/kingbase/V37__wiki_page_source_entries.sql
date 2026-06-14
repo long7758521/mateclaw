@@ -3,4 +3,4 @@
 -- Dual-written alongside the existing source_raw_ids for backwards compatibility.
 -- KingbaseES (PostgreSQL) supports ADD COLUMN IF NOT EXISTS natively.
 
-ALTER TABLE mate_wiki_page ADD COLUMN IF NOT EXISTS source_entries JSONB NULL;
+ALTER TABLE mate_wiki_page ADD COLUMN IF NOT EXISTS source_entries TEXT NULL;

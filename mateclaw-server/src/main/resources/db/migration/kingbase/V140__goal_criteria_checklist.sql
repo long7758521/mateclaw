@@ -14,6 +14,6 @@ BEGIN
         SELECT 1 FROM information_schema.columns
         WHERE table_name = 'mate_agent_goal' AND column_name = 'criteria'
     ) THEN
-        ALTER TABLE mate_agent_goal ADD COLUMN criteria JSON NULL;
+        ALTER TABLE mate_agent_goal ADD COLUMN criteria TEXT NULL;
     END IF;
 END $$;

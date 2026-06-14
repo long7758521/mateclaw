@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS mate_message (
     runtime_model   VARCHAR(128),
     runtime_provider VARCHAR(64),
     status          VARCHAR(32)  NOT NULL DEFAULT 'completed',
-    metadata        JSONB,
+    metadata        TEXT,
     create_time     TIMESTAMP     NOT NULL,
     update_time     TIMESTAMP     NOT NULL,
     deleted         INT          NOT NULL DEFAULT 0
