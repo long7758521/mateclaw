@@ -284,8 +284,25 @@ public class ReasoningNode implements NodeAction {
             + "5. **内容忠实**：必须准确反映证据内容，不得歪曲、编造或过度推断。\n\n"
             + "**违规后果**：未按规则引用来源或使用未验证的信息将导致回答被拒绝。\n";
 
-    private static String buildGroundedSystemPrompt(String basePrompt) {
-        return basePrompt + TOOL_USE_ENFORCEMENT + GROUNDED_CONTRACT;
+    private static String buildGroundedSystemPrompt(String basePrompt, boolean groundingEnforced) {
+        String prompt = basePrompt + TOOL_USE_ENFORCEMENT;
+        return groundingEnforced ? prompt + GROUNDED_CONTRACT : prompt;
+    }
+
+    /**
+     * The grounded-answer contract (cite-or-refuse) only fits agents that retrieve
+     * from a knowledge base. Detecting a bound {@code wiki_*} tool scopes the strict
+     * regime to those scenarios instead of degrading every agent — a casual agent
+     * with no KB should not be forced to refuse or emit [n] citations.
+     */
+    private boolean hasWikiTool() {
+        if (toolCallbacks == null) {
+            return false;
+        }
+        return toolCallbacks.stream().anyMatch(cb -> {
+            String name = cb.getToolDefinition().name();
+            return name != null && name.toLowerCase(Locale.ROOT).replace("-", "_").startsWith("wiki_");
+        });
     }
 
     private final ChatModel chatModel;
@@ -542,14 +559,16 @@ public class ReasoningNode implements NodeAction {
 
         // ======= 构建 Prompt =======
         String systemPrompt = accessor.systemPrompt();
-        // Append tool-use enforcement and grounded contract to every ReasoningNode call.
-        // Without tool-use enforcement, some models tend to "narrate" instead of calling tools.
-        // Grounded contract ensures answers are based only on evidence from tool results.
+        // Tool-use enforcement is always appended: without it some models tend to
+        // "narrate" instead of calling tools. The grounded contract (cite-or-refuse)
+        // is appended only when the agent has a knowledge-base (wiki_*) tool bound,
+        // so KB-grounded scenarios get strict source attribution while general
+        // agents keep their normal answering behaviour.
         //
         // Appended at runtime rather than woven into the AgentEntity-stored
         // prompt so it stays out of the user-editable agent UI but is still
         // always-on for the runtime LLM.
-        systemPrompt = buildGroundedSystemPrompt(systemPrompt);
+        systemPrompt = buildGroundedSystemPrompt(systemPrompt, hasWikiTool());
         List<Message> messages = accessor.messages();
 
         // Per-loop budget: bound the working message list a single Reasoning

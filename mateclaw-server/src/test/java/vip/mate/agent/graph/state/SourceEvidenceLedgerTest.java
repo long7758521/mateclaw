@@ -234,4 +234,19 @@ class SourceEvidenceLedgerTest {
         assertTrue(rendered.contains("[1] Install Guide - Linux - page 12"));
         assertTrue(ledger.validateAnswer(rendered).valid());
     }
+
+    @Test
+    @DisplayName("non-wiki tool JSON with a top-level title does not create wiki citations")
+    void nonWikiToolWithTitleDoesNotForceCitations() {
+        // getGoalStatus returns a top-level "title" field; it must not be mined as a
+        // wiki citation, otherwise a final answer with no [n] markers would be wrongly
+        // flagged EVIDENCE_INSUFFICIENT.
+        SourceEvidenceLedger ledger = SourceEvidenceLedger.fromToolResponses(List.of(
+                new ToolResponseMessage.ToolResponse("c1", "getGoalStatus", """
+                        {"active":true,"goalId":"42","title":"Ship the release","status":"in_progress"}
+                        """)));
+
+        assertFalse(ledger.hasWikiEvidence());
+        assertTrue(ledger.validateAnswer("The release is on track.").valid());
+    }
 }

@@ -63,7 +63,14 @@ public record SourceEvidenceLedger(
                 recordReadFile(data, builder);
             } else {
                 recordPlainTextEvidence(data, builder);
-                recordWikiEvidence(data, builder);
+                // Only mine wiki citations from wiki retrieval tools. Sniffing every
+                // tool's JSON for a top-level title/pages/chunks field would let
+                // unrelated tools (e.g. getGoalStatus, which returns a top-level
+                // "title") populate the citation set and falsely force [n] citation
+                // enforcement on the final answer.
+                if (isWikiTool(response.name())) {
+                    recordWikiEvidence(data, builder);
+                }
             }
         }
         return builder.build();
@@ -273,6 +280,13 @@ public record SourceEvidenceLedger(
         }
         String normalized = name.toLowerCase(Locale.ROOT).replace("-", "_");
         return normalized.equals("read_file");
+    }
+
+    private static boolean isWikiTool(String name) {
+        if (name == null) {
+            return false;
+        }
+        return name.toLowerCase(Locale.ROOT).replace("-", "_").startsWith("wiki_");
     }
 
     private static void recordReadFile(String data, Builder builder) {
