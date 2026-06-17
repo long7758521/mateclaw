@@ -1178,7 +1178,11 @@ const executionPhaseLabel = computed(() => {
   }
   if (planMeta.value) {
     const done = planMeta.value.stepResults?.filter(r => r?.status === 'completed').length || 0
-    return `Plan-Execute (${done}/${planMeta.value.steps.length})`
+    // Guard steps: a plan payload can arrive with steps undefined (mid-stream /
+    // malformed metadata). An unguarded .length here throws during render, which
+    // blanks the whole message subtree until a full remount (page refresh) — the
+    // "chat goes blank on switch, refresh fixes it" bug. Mirror the ?. used below.
+    return `Plan-Execute (${done}/${planMeta.value.steps?.length ?? 0})`
   }
   if (toolCallsMeta.value.length) {
     const done = toolCallsMeta.value.filter(t => t.status === 'completed').length
