@@ -109,6 +109,8 @@ export const agentApi = {
   list: (params?: { enabled?: boolean }) => http.get('/agents', { params }),
   get: (id: string | number) => http.get(`/agents/${id}`),
   create: (data: any) => http.post('/agents', data),
+  /** Generate a reviewable employee draft from a one-sentence requirement (no persistence). */
+  generate: (requirement: string) => http.post('/agents/generate', { requirement }),
   update: (id: string | number, data: any) => http.put(`/agents/${id}`, data),
   delete: (id: string | number) => http.delete(`/agents/${id}`),
   chat: (id: string | number, data: any) => http.post(`/agents/${id}/chat`, data),
