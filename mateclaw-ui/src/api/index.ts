@@ -522,6 +522,8 @@ export const mcpApi = {
 // ==================== Plan ====================
 export const planApi = {
   listByAgent: (agentId: string) => http.get(`/plans?agentId=${agentId}`),
+  /** Cross-agent recent plans for the team / swimlane board. */
+  listAll: (limit = 100) => http.get('/plans', { params: { limit } }),
   get: (id: string | number) => http.get(`/plans/${id}`),
 }
 

@@ -34,8 +34,18 @@ public class PlanningService {
      */
     @Transactional
     public PlanEntity createPlan(String agentId, String goal, List<String> steps) {
+        return createPlan(agentId, null, goal, steps);
+    }
+
+    /**
+     * 创建执行计划，并绑定到产生它的对话/运行。
+     * conversationId 可空（历史调用方），便于把计划归到某次运行，支撑跨员工/协同看板。
+     */
+    @Transactional
+    public PlanEntity createPlan(String agentId, String conversationId, String goal, List<String> steps) {
         PlanEntity plan = new PlanEntity();
         plan.setAgentId(agentId);
+        plan.setConversationId(conversationId);
         plan.setGoal(goal);
         plan.setStatus("running");
         plan.setTotalSteps(steps.size());
@@ -109,6 +119,17 @@ public class PlanningService {
         return planMapper.selectList(new LambdaQueryWrapper<PlanEntity>()
                 .eq(PlanEntity::getAgentId, agentId)
                 .orderByDesc(PlanEntity::getCreateTime));
+    }
+
+    /**
+     * 跨员工获取最近的计划列表（用于团队/泳道看板）。
+     * 按创建时间倒序，limit 兜底防止全表拉取。
+     */
+    public List<PlanEntity> listRecentPlans(int limit) {
+        int capped = limit <= 0 ? 100 : Math.min(limit, 500);
+        return planMapper.selectList(new LambdaQueryWrapper<PlanEntity>()
+                .orderByDesc(PlanEntity::getCreateTime)
+                .last("LIMIT " + capped));
     }
 
     /**

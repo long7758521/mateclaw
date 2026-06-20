@@ -723,6 +723,8 @@ export interface SubPlan {
 export interface Plan {
   id: string | number
   agentId: string
+  /** Conversation/run that produced the plan (may be absent on legacy rows). */
+  conversationId?: string
   goal: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   totalSteps: number

@@ -284,7 +284,11 @@ public class PlanGenerationNode implements NodeAction {
         }
 
         String systemPrompt = accessor.systemPrompt();
-        String agentId = state.value(MateClawStateKeys.TRACE_ID, "unknown");
+        // Persist plans under the real agent id (the same key StepExecutionNode
+        // reads), NOT the per-run trace id — otherwise mate_plan.agent_id holds a
+        // random trace string and listByAgent never matches, leaving the Plan
+        // board permanently empty even after plans are generated.
+        String agentId = state.value(MateClawStateKeys.AGENT_ID, "");
         String conversationId = accessor.conversationId();
 
         log.info("[PlanGeneration] Evaluating goal: {}", goal.length() > 100 ? goal.substring(0, 100) + "..." : goal);
@@ -410,7 +414,7 @@ public class PlanGenerationNode implements NodeAction {
                             + "downgrading to single-step plan so tools can execute (goal: {})",
                             goal.length() > 60 ? goal.substring(0, 60) + "..." : goal);
                     List<String> gatedSteps = List.of(goal);
-                    var gatedPlan = planningService.createPlan(agentId, goal, gatedSteps);
+                    var gatedPlan = planningService.createPlan(agentId, conversationId, goal, gatedSteps);
                     events.add(GraphEventPublisher.planCreated(gatedPlan.getId(), gatedSteps));
                     return PlanStateAccessor.output()
                             .needsPlanning(true)
@@ -451,7 +455,7 @@ public class PlanGenerationNode implements NodeAction {
                 steps = List.of(goal);
             }
 
-            var plan = planningService.createPlan(agentId, goal, steps);
+            var plan = planningService.createPlan(agentId, conversationId, goal, steps);
             log.info("[PlanGeneration] Plan created: id={}, steps={} ({})",
                     plan.getId(), steps.size(), steps.size() == 1 ? "single-step" : "multi-step");
 
@@ -495,7 +499,7 @@ public class PlanGenerationNode implements NodeAction {
             // answer. This preserves tool access on the failure path; the previous
             // "direct answer" fallback silently degraded tool-requiring tasks.
             try {
-                var plan = planningService.createPlan(agentId, goal, List.of(goal));
+                var plan = planningService.createPlan(agentId, conversationId, goal, List.of(goal));
                 events.add(GraphEventPublisher.planCreated(plan.getId(), List.of(goal)));
                 return PlanStateAccessor.output()
                         .needsPlanning(true)

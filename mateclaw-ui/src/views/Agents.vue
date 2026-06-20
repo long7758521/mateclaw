@@ -30,6 +30,11 @@
                   :class="{ warn: liveStuck > 0 }"
                 >{{ liveRunning }}</span>
               </button>
+              <button
+                class="view-seg"
+                :class="{ 'is-active': view === 'plans' }"
+                @click="setView('plans')"
+              >{{ t('agents.views.plans') }}</button>
             </div>
             <button class="btn-secondary" style="display:inline-flex;align-items:center;gap:6px;" @click="router.push('/agents/create')">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -162,7 +167,10 @@
         </template>
 
         <!-- Live: what the team is doing right now -->
-        <LivePanel v-else />
+        <LivePanel v-else-if="view === 'live'" />
+
+        <!-- Plans: the team's plans as a step board -->
+        <PlanBoard v-else-if="view === 'plans'" />
       </div>
     </div>
     
@@ -707,6 +715,7 @@ import type { Agent } from '@/types/index'
 import SkillIcon from '@/components/common/SkillIcon.vue'
 import SkillIconPicker from '@/components/common/SkillIconPicker.vue'
 import LivePanel from '@/components/live/LivePanel.vue'
+import PlanBoard from '@/components/agents/PlanBoard.vue'
 import AgentGuideEditor from './Agents/components/AgentGuideEditor.vue'
 import {
   emptyProfile,
@@ -1133,16 +1142,19 @@ const filteredAgents = computed(() => {
 // Roster ↔ Live view switch — admin only. The running/stuck counts feed the
 // segmented control's pulse + badge so you know whether Live is worth a look.
 const isAdminRole = computed(() => (localStorage.getItem('role') || 'user') === 'admin')
-const view = ref<'roster' | 'live'>(
-  route.query.view === 'live' && isAdminRole.value ? 'live' : 'roster',
+type AgentView = 'roster' | 'live' | 'plans'
+const view = ref<AgentView>(
+  isAdminRole.value && (route.query.view === 'live' || route.query.view === 'plans')
+    ? (route.query.view as AgentView)
+    : 'roster',
 )
 const liveRunning = ref(0)
 const liveStuck = ref(0)
 let livePollTimer: ReturnType<typeof setInterval> | null = null
 
-function setView(next: 'roster' | 'live') {
+function setView(next: AgentView) {
   view.value = next
-  router.replace({ query: next === 'live' ? { view: 'live' } : {} })
+  router.replace({ query: next === 'roster' ? {} : { view: next } })
 }
 
 async function refreshLiveCounts() {

@@ -66,10 +66,8 @@ init({ apiKey: 'your-channel-api-key', server: 'https://<你的部署地址>' })
 
 | 方法 | 路径 | 鉴权 | 用途 |
 |---|---|---|---|
-| POST | `/stream` | API Key | SSE 流式对话(签发 visitorToken);请求体可选传 `agentId` 覆盖渠道绑定的 agent(必须与渠道同 workspace) |
+| POST | `/stream` | API Key | SSE 流式对话(签发 visitorToken) |
 | GET | `/config` | API Key | 拿渠道配置(title/placeholder/...) |
-| GET | `/skills` | + visitorToken | 列出该 agent 绑定的可见技能(供下游自建 slash picker UI) |
-| GET | `/wiki/pages` | + visitorToken | 列出该 agent 可见的 wiki 页面(供下游自建 `[[slug]]` 引用 picker UI) |
 | POST | `/sessions` | API Key | 显式创建空会话线程 |
 | GET | `/sessions` | + visitorToken | 列出会话(默认排除 archived) |
 | GET | `/sessions/page` | + visitorToken | 分页 + 关键词搜索 |
@@ -205,89 +203,6 @@ curl -X POST https://mate.example.com/api/v1/admin/webchat/revoked-visitor \
 ```
 
 撤销后该 visitor 的所有管理端点调用返回 401(`/stream` 不受影响,可重新签发新 token)。撤销状态带短时缓存,多实例下最长约 10 分钟生效。取消撤销用 `DELETE` 同一端点。
-
-## 技能调用(slash picker)
-
-主控台前端在输入框键入 `/` 会弹出技能选择菜单。这是**纯前端 affordance**——选中后输入框被改写成指令文本:
-
-- 中文:`使用「<技能名>」技能:<用户消息>`
-- 英文:`Use the "<skill-name>" skill: <用户消息>`
-
-指令文本作为普通 user message 发到 `/stream`,LLM 收到后调用 `load_skill` 元工具(详见 [skills.md](./skills.md#slash-菜单))。后端**不做 `/` 解析**,webchat 走的是和主控台完全一样的 agent runtime,所以这条路径对 webchat 调用方**开箱即用**。
-
-下游集成方要自建 picker UI,先用新端点拿清单:
-
-```bash
-curl https://mate.example.com/api/v1/channels/webchat/skills?visitorId=v1 \
-  -H "X-MC-Key: your-api-key" \
-  -H "X-MC-Visitor-Token: <token>"
-# 返回 [{"id":..., "name":"news-summary", "nameZh":"新闻摘要", "description":"...", "icon":"..."}]
-```
-
-可选 `agentId` 参数(默认回落到渠道绑定的 agent);只返回该 agent **显式绑定且 enabled** 的技能,按 slug 字母序排序。返回字段是展示级元数据,**不包含** SKILL.md 正文、configJson、安全扫描结果——这些只走管理控制台。
-
-选中后构造消息:
-
-```bash
-curl -N -X POST https://mate.example.com/api/v1/channels/webchat/stream \
-  -H "X-MC-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"visitorId":"v1","message":"使用「新闻摘要」技能:总结今天最重要的 3 条 AI 新闻"}'
-```
-
-> 注意:指令文本依赖 LLM "听话"调用 `load_skill`。复杂任务下偶发漂移,生产环境建议把目标技能**绑定**到 agent(`agentId` 对应的)并在 `AGENTS.md` 里强化系统提示。
-
-## Wiki 知识库引用(`[[slug]]` picker)
-
-跟技能调用一样,wiki 知识库也可以通过 picker 显式指代——用 **Obsidian / Wikipedia 风格的 `[[slug]]` 链接语法**。用户在输入框敲 `[[` 触发 picker,选中后插入 `[[<slug>]]` token,发送时改写为指令文本,LLM 收到后调 `wiki_read_page(slug=...)` 读取该页面再做答。后端**不做任何 `[[` 解析**,webchat 走的是和主控台完全一样的 agent runtime。
-
-指令文本格式(**精确**):
-
-- 中文:`参考知识库页面 [[<slug>]]:<用户消息>`
-- 英文:`Reference the wiki page [[<slug>]]: <user message>`
-
-多引用天然支持(并列写即可):
-
-```
-参考知识库页面 [[auth-design]]、[[webchat-integration]]:这两套怎么协同?
-```
-
-下游集成方要自建 picker UI,先用端点拿页面清单:
-
-```bash
-curl "https://mate.example.com/api/v1/channels/webchat/wiki/pages?visitorId=v1" \
-  -H "X-MC-Key: your-api-key" \
-  -H "X-MC-Visitor-Token: <token>"
-# 返回 [{"kbId":1,"kbName":"MateClaw 文档","slug":"webchat-integration",
-#        "title":"WebChat 接入指南","summary":"...","pageType":"source"}, ...]
-```
-
-可选 query 参数:
-
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `visitorId` | 是 | 访客 ID |
-| `agentId` | 否 | 显式指定 agent,缺省回落到渠道绑定;必须与渠道同 workspace |
-| `keyword` | 否 | 关键词过滤,匹配 `slug` 或 `title`(LIKE) |
-
-行为约束:
-
-- **可见范围**:agent 显式绑定的 KB(`mate_agent_wiki_kb` 表);无绑定时回落到该 workspace 全部 KB(跟 wiki 工具的默认行为一致)
-- **页面过滤**:排除 `pageType=synthesis`(LLM 中间产物,对终端访客无意义)
-- **100 页上限**:超出时(且未传 `keyword`)返回 `422`,要求传 `keyword` 收窄
-- **返回字段**:仅 `kbId / kbName / slug / title / summary / pageType`;**不包含**正文、embedding、sourceRawIds、outgoingLinks(这些只走管理控制台)
-- **排序**:按 `slug` 字母序
-
-选中后构造消息(中文 directive 示例):
-
-```bash
-curl -N -X POST https://mate.example.com/api/v1/channels/webchat/stream \
-  -H "X-MC-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"visitorId":"v1","message":"参考知识库页面 [[webchat-integration]]:总结这套接入流程"}'
-```
-
-> 注意:`[[slug]]` 是给 LLM 看的约定提示(`wiki_read_page` 的 `@Tool` description 里写明了),但 LLM 仍可能漂移——复杂任务下建议同时在 `AGENTS.md` 里强化提示,或把目标 KB **绑定**到专用 agent 收窄检索空间。
 
 ## curl 示例
 
