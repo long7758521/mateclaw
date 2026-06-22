@@ -274,6 +274,30 @@ public class WikiController {
         return R.ok();
     }
 
+    @RequireWorkspaceRole("admin")
+    @Operation(summary = "按当前 pageType profile 重新分类已有页面（异步，不改内容）")
+    @PostMapping("/knowledge-bases/{id}/reclassify")
+    public R<Map<String, Object>> reclassifyKB(@PathVariable Long id,
+                                               @RequestBody(required = false) Map<String, Object> body,
+                                               @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
+        Long modelId = null;
+        if (body != null && body.get("modelId") != null) {
+            modelId = Long.valueOf(String.valueOf(body.get("modelId")));
+        }
+        int queued;
+        try {
+            queued = processingService.reclassifyKB(id, modelId);
+        } catch (IllegalStateException e) {
+            // A reclassification is already running for this KB — surface a
+            // friendly message rather than a generic 500.
+            return R.fail(e.getMessage());
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("queued", queued);
+        return R.ok(out);
+    }
+
     // ==================== Directory Scan ====================
 
     @RequireWorkspaceRole("member")
@@ -285,7 +309,7 @@ public class WikiController {
         String path = body.get("path");
         if (path != null && !path.isBlank()) {
             try {
-                pathValidator.validateDirectory(path);
+                pathValidator.validateSourcePatterns(path);
             } catch (IllegalArgumentException e) {
                 return R.fail(400, e.getMessage());
             }
@@ -321,13 +345,30 @@ public class WikiController {
         if (kb == null) return R.fail(404, "Knowledge base not found");
         vip.mate.wiki.source.WikiIngestSourceProvider provider = sourceWatcherService.providerFor(kb);
         Map<String, Object> out = new LinkedHashMap<>();
+        // Global master switch (ops): gates the scheduler at all.
         out.put("watcherEnabled", properties.isWatcherEnabled());
+        // Per-KB opt-in: auto-sync runs only when both are true (AND semantics).
+        out.put("kbWatcherEnabled", kb.getWatcherEnabled() != null && kb.getWatcherEnabled() == 1);
         out.put("intervalMs", properties.getWatcherIntervalMs());
         out.put("sourceDirectory", kb.getSourceDirectory());
         out.put("sourceType", provider != null ? provider.sourceType() : null);
         out.put("availableSourceTypes", sourceWatcherService.availableSourceTypes());
         out.put("active", provider != null);
         return R.ok(out);
+    }
+
+    @RequireWorkspaceRole("member")
+    @Operation(summary = "开关知识库的自动同步（每库）")
+    @PutMapping("/knowledge-bases/{id}/source-watcher/enabled")
+    public R<Void> setWatcherEnabled(@PathVariable Long id, @RequestBody Map<String, Object> body,
+                                     @RequestHeader(value = "X-Workspace-Id", required = false) Long workspaceId) {
+        verifyKBWorkspace(id, workspaceId);
+        WikiKnowledgeBaseEntity kb = kbService.getById(id);
+        if (kb == null) return R.fail(404, "Knowledge base not found");
+        Object v = body.get("enabled");
+        boolean enabled = (v instanceof Boolean b) ? b : Boolean.parseBoolean(String.valueOf(v));
+        kbService.updateWatcherEnabled(id, enabled);
+        return R.ok();
     }
 
     @RequireWorkspaceRole("member")

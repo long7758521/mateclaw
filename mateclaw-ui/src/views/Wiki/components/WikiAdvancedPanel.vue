@@ -10,32 +10,15 @@
     </div>
 
     <!-- ===================== REQ-1: PageType Profile ===================== -->
-    <section v-if="section === 'profile'" class="adv-section">
-      <header class="adv-head">
-        <div>
-          <h3>{{ t('wiki.adv.profile.title') }}</h3>
-          <p class="adv-desc">{{ t('wiki.adv.profile.desc') }}</p>
-        </div>
-        <span v-if="profile.builtinDefault" class="badge badge-muted">{{ t('wiki.adv.profile.builtin') }}</span>
-        <span v-else class="badge badge-ok">v{{ profile.version }}</span>
-      </header>
-      <textarea
-        v-model="profile.config"
-        class="code-editor" spellcheck="false"
-        :placeholder="t('wiki.adv.profile.placeholder')"
-      ></textarea>
-      <div v-if="profile.issues.length" class="issue-box">
-        <div v-for="(iss, i) in profile.issues" :key="i" class="issue-line">⚠ {{ iss }}</div>
-      </div>
-      <div class="adv-actions">
-        <button class="btn-ghost" @click="validateProfile" :disabled="profile.busy">{{ t('wiki.adv.validate') }}</button>
-        <button class="btn-ghost danger" @click="resetProfile" :disabled="profile.busy">{{ t('wiki.adv.profile.reset') }}</button>
-        <button class="btn-primary" @click="saveProfile" :disabled="profile.busy">{{ t('common.save') }}</button>
-      </div>
-    </section>
+    <!--
+      Kept mounted via v-show (not v-if) so the guided form editor preserves
+      in-progress edits when the user bounces to another advanced sub-tab and
+      back. The editor loads/validates/saves the profile itself.
+    -->
+    <WikiPageTypeProfileEditor v-show="section === 'profile'" class="adv-section" />
 
     <!-- ===================== REQ-2: Layers & Stale ===================== -->
-    <section v-else-if="section === 'layers'" class="adv-section">
+    <section v-if="section === 'layers'" class="adv-section">
       <header class="adv-head">
         <div>
           <h3>{{ t('wiki.adv.layers.title') }}</h3>
@@ -124,36 +107,7 @@
       </template>
     </section>
 
-    <!-- ===================== REQ-4: Source Watcher ===================== -->
-    <section v-else-if="section === 'watcher'" class="adv-section">
-      <header class="adv-head">
-        <div>
-          <h3>{{ t('wiki.adv.watcher.title') }}</h3>
-          <p class="adv-desc">{{ t('wiki.adv.watcher.desc') }}</p>
-        </div>
-        <button class="btn-ghost" @click="loadWatcher" :disabled="watcher.busy">{{ t('common.refresh') }}</button>
-      </header>
-      <div class="kv-grid">
-        <div class="kv"><span>{{ t('wiki.adv.watcher.enabled') }}</span><b>{{ watcher.data.watcherEnabled ? t('common.yes') : t('common.no') }}</b></div>
-        <div class="kv"><span>{{ t('wiki.adv.watcher.active') }}</span><b>{{ watcher.data.active ? t('common.yes') : t('common.no') }}</b></div>
-        <div class="kv"><span>{{ t('wiki.adv.watcher.interval') }}</span><b>{{ watcher.data.intervalMs ? (watcher.data.intervalMs / 1000) + 's' : '—' }}</b></div>
-        <div class="kv"><span>{{ t('wiki.adv.watcher.sourceType') }}</span><b>{{ watcher.data.sourceType || '—' }}</b></div>
-      </div>
-      <label class="field-label">{{ t('wiki.adv.watcher.directory') }}</label>
-      <div class="dir-row">
-        <input v-model.trim="watcher.dir" class="form-input" :placeholder="t('wiki.adv.watcher.dirHint')" />
-        <button class="btn-ghost" @click="saveDirectory" :disabled="watcher.busy">{{ t('common.save') }}</button>
-      </div>
-      <p v-if="watcher.data.availableSourceTypes?.length" class="adv-desc">
-        {{ t('wiki.adv.watcher.availableTypes') }}: {{ watcher.data.availableSourceTypes.join(', ') }}
-      </p>
-      <div class="adv-actions">
-        <button class="btn-primary" @click="triggerScan" :disabled="watcher.busy || !watcher.data.active">{{ t('wiki.adv.watcher.scanNow') }}</button>
-      </div>
-      <div v-if="watcher.lastScan" class="issue-box ok">
-        {{ t('wiki.adv.watcher.scanResult', { scanned: watcher.lastScan.scanned, added: watcher.lastScan.added, skipped: watcher.lastScan.skipped, errors: watcher.lastScan.errors }) }}
-      </div>
-    </section>
+    <!-- Source-watcher moved to the unified Sources tab (RawMaterialPanel). -->
 
     <!-- ===================== REQ-5: Pipeline ===================== -->
     <section v-else-if="section === 'pipeline'" class="adv-section">
@@ -229,6 +183,7 @@ import { wikiApi } from '@/api/index'
 import { mcToast } from '@/composables/useMcToast'
 import { mcConfirm } from '@/components/common/useConfirm'
 import AgentPickerDialog from '@/components/common/AgentPickerDialog.vue'
+import WikiPageTypeProfileEditor from './WikiPageTypeProfileEditor.vue'
 
 const { t } = useI18n()
 const store = useWikiStore()
@@ -238,12 +193,11 @@ const agentStore = useAgentStore()
 const kbId = computed(() => (store.currentKB ? String(store.currentKB.id) : ''))
 const agents = computed(() => agentStore.agents)
 
-const section = ref<'profile' | 'layers' | 'permissions' | 'watcher' | 'pipeline'>('profile')
+const section = ref<'profile' | 'layers' | 'permissions' | 'pipeline'>('profile')
 const sections = computed(() => [
   { key: 'profile' as const, label: t('wiki.adv.profile.tab') },
   { key: 'layers' as const, label: t('wiki.adv.layers.tab') },
   { key: 'permissions' as const, label: t('wiki.adv.perm.tab') },
-  { key: 'watcher' as const, label: t('wiki.adv.watcher.tab') },
   { key: 'pipeline' as const, label: t('wiki.adv.pipeline.tab') },
 ])
 
@@ -254,50 +208,13 @@ function switchSection(key: typeof section.value) {
   loaded[key] = true
   if (key === 'layers') loadLayers()
   else if (key === 'permissions') { if (agents.value.length === 0) agentStore.fetchAgents() }
-  else if (key === 'watcher') loadWatcher()
   else if (key === 'pipeline') loadPipelines()
 }
 
 function unwrap(res: any) { return res?.data ?? res }
 function errMsg(e: any, fallback: string) { return e?.response?.data?.message || fallback }
 
-// ---- REQ-1 Profile ----
-const profile = reactive({ config: '', version: 0, builtinDefault: true, issues: [] as string[], busy: false })
-async function loadProfile() {
-  if (!kbId.value) return
-  try {
-    const d = unwrap(await wikiApi.getPageTypeProfile(kbId.value))
-    profile.config = typeof d.config === 'string' ? d.config : JSON.stringify(d.config, null, 2)
-    profile.version = d.version
-    profile.builtinDefault = d.builtinDefault
-  } catch (e: any) { mcToast.error(errMsg(e, 'Load profile failed')) }
-}
-async function validateProfile() {
-  profile.busy = true
-  try {
-    const d = unwrap(await wikiApi.validatePageTypeProfile(kbId.value, profile.config))
-    profile.issues = d.issues || []
-    if (d.valid) mcToast.success(t('wiki.adv.validOk'))
-  } catch (e: any) { mcToast.error(errMsg(e, 'Validate failed')) } finally { profile.busy = false }
-}
-async function saveProfile() {
-  profile.busy = true
-  try {
-    await wikiApi.savePageTypeProfile(kbId.value, profile.config)
-    mcToast.success(t('common.saved'))
-    profile.issues = []
-    await loadProfile()
-  } catch (e: any) { mcToast.error(errMsg(e, 'Save failed')) } finally { profile.busy = false }
-}
-async function resetProfile() {
-  if (!(await mcConfirm({ title: t('wiki.adv.profile.reset'), message: t('wiki.adv.profile.resetConfirm'), tone: 'danger' }))) return
-  profile.busy = true
-  try {
-    await wikiApi.resetPageTypeProfile(kbId.value)
-    mcToast.success(t('common.saved'))
-    await loadProfile()
-  } catch (e: any) { mcToast.error(errMsg(e, 'Reset failed')) } finally { profile.busy = false }
-}
+// ---- REQ-1 Profile lives in WikiPageTypeProfileEditor (guided form + JSON) ----
 
 // ---- REQ-2 Layers & Stale ----
 const layers = reactive({ pages: [] as any[], busy: false })
@@ -362,31 +279,7 @@ async function deletePermission(row: any) {
 function flag(v: any) { return v ? '✓' : '·' }
 function policyClass(p?: string) { return p === 'allow' ? 'badge-ok' : p === 'deny' ? 'badge-warn' : 'badge-muted' }
 
-// ---- REQ-4 Watcher ----
-const watcher = reactive({ data: {} as any, dir: '', lastScan: null as any, busy: false })
-async function loadWatcher() {
-  if (!kbId.value) return
-  watcher.busy = true
-  try {
-    watcher.data = unwrap(await wikiApi.getSourceWatcher(kbId.value)) || {}
-    watcher.dir = watcher.data.sourceDirectory || ''
-  } catch (e: any) { mcToast.error(errMsg(e, 'Load watcher failed')) } finally { watcher.busy = false }
-}
-async function saveDirectory() {
-  watcher.busy = true
-  try {
-    await wikiApi.setSourceDirectory(kbId.value, watcher.dir)
-    mcToast.success(t('common.saved'))
-    await loadWatcher()
-  } catch (e: any) { mcToast.error(errMsg(e, 'Save failed')) } finally { watcher.busy = false }
-}
-async function triggerScan() {
-  watcher.busy = true
-  try {
-    watcher.lastScan = unwrap(await wikiApi.triggerSourceWatcher(kbId.value))
-    mcToast.success(t('wiki.adv.watcher.scanDone'))
-  } catch (e: any) { mcToast.error(errMsg(e, 'Scan failed')) } finally { watcher.busy = false }
-}
+// REQ-4 Source-watcher moved to the unified Sources tab (RawMaterialPanel).
 
 // ---- REQ-5 Pipeline ----
 const pipeline = reactive({ defs: [] as any[], config: '', issues: [] as string[], runsFor: null as any, runs: [] as any[], busy: false })
@@ -434,7 +327,7 @@ function runClass(s?: string) {
   return 'badge-muted'
 }
 
-onMounted(() => { loaded.profile = true; loadProfile() })
+onMounted(() => { loaded.profile = true })
 </script>
 
 <style scoped>
@@ -505,6 +398,7 @@ onMounted(() => { loaded.profile = true; loadProfile() })
 .kv b { font-size: 14px; color: var(--mc-text-primary); }
 .dir-row { display: flex; gap: 8px; }
 .dir-row .form-input { flex: 1; }
+.dir-editor { min-height: 100px; font-size: 12.5px; }
 
 .runs-box { border: 1px solid var(--mc-border-light); border-radius: 12px; padding: 12px; background: var(--mc-bg-muted); }
 .runs-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }

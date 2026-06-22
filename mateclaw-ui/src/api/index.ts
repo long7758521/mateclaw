@@ -9,6 +9,17 @@ import type {
   GrantScope,
 } from '@/types'
 
+/**
+ * URL-encode a conversation id before interpolating it into a path. Some ids
+ * contain characters that the browser interprets as URL structural — notably
+ * `#`, which webchat emits as a hash marker when the visitorId+sessionId pair
+ * exceeds the conversation_id column width (see WebChatController#deriveConversationId:
+ * `webchat:<key8>:#<sha256[0..40]>`). Without encoding, everything after the
+ * `#` is treated as a fragment and never reaches the server, producing 405 on
+ * `@DeleteMapping` fallbacks and 403 from the owner check.
+ */
+const encId = (id: string) => encodeURIComponent(id)
+
 // Axios 实例
 export const http = axios.create({
   baseURL: '/api/v1',
@@ -109,6 +120,8 @@ export const agentApi = {
   list: (params?: { enabled?: boolean }) => http.get('/agents', { params }),
   get: (id: string | number) => http.get(`/agents/${id}`),
   create: (data: any) => http.post('/agents', data),
+  /** Generate a reviewable employee draft from a one-sentence requirement (no persistence). */
+  generate: (requirement: string) => http.post('/agents/generate', { requirement }),
   update: (id: string | number, data: any) => http.put(`/agents/${id}`, data),
   delete: (id: string | number) => http.delete(`/agents/${id}`),
   chat: (id: string | number, data: any) => http.post(`/agents/${id}/chat`, data),
@@ -154,9 +167,9 @@ export const chatApi = {
     })
   },
   stop: (conversationId: string) =>
-    http.post<{ stopped: boolean }>(`/chat/${conversationId}/stop`),
+    http.post<{ stopped: boolean }>(`/chat/${encId(conversationId)}/stop`),
   getPendingApprovals: (conversationId: string) =>
-    http.get(`/chat/${conversationId}/pending-approvals`),
+    http.get(`/chat/${encId(conversationId)}/pending-approvals`),
 }
 
 // ==================== Conversation ====================
@@ -170,17 +183,17 @@ export const conversationApi = {
   page: (params: { page?: number; size?: number; keyword?: string }) =>
     http.get('/conversations/page', { params }),
   listMessages: (conversationId: string, params?: { beforeId?: number; limit?: number }) =>
-    http.get(`/conversations/${conversationId}/messages`, { params }),
+    http.get(`/conversations/${encId(conversationId)}/messages`, { params }),
   getStatus: (conversationId: string) =>
-    http.get(`/conversations/${conversationId}/status`),
+    http.get(`/conversations/${encId(conversationId)}/status`),
   delete: (conversationId: string) =>
-    http.delete(`/conversations/${conversationId}`),
+    http.delete(`/conversations/${encId(conversationId)}`),
   clearMessages: (conversationId: string) =>
-    http.delete(`/conversations/${conversationId}/messages`),
+    http.delete(`/conversations/${encId(conversationId)}/messages`),
   rename: (conversationId: string, title: string) =>
-    http.put(`/conversations/${conversationId}/title`, { title }),
+    http.put(`/conversations/${encId(conversationId)}/title`, { title }),
   setPinned: (conversationId: string, pinned: boolean) =>
-    http.put(`/conversations/${conversationId}/pin`, { pinned }),
+    http.put(`/conversations/${encId(conversationId)}/pin`, { pinned }),
   /**
    * Pin this conversation to a specific (provider, model). Closes issue
    * #183 — lets the admin UI switch model for IM-channel conversations
@@ -188,7 +201,7 @@ export const conversationApi = {
    * not just for the Web channel. Both params required and non-empty.
    */
   setModel: (conversationId: string, modelProvider: string, modelName: string) =>
-    http.put(`/conversations/${conversationId}/model`, { modelProvider, modelName }),
+    http.put(`/conversations/${encId(conversationId)}/model`, { modelProvider, modelName }),
   batchDelete: (conversationIds: string[]) =>
     http.post('/conversations/batch-delete', { conversationIds }),
 }
@@ -509,6 +522,8 @@ export const mcpApi = {
 // ==================== Plan ====================
 export const planApi = {
   listByAgent: (agentId: string) => http.get(`/plans?agentId=${agentId}`),
+  /** Cross-agent recent plans for the team / swimlane board. */
+  listAll: (limit = 100) => http.get('/plans', { params: { limit } }),
   get: (id: string | number) => http.get(`/plans/${id}`),
 }
 
@@ -642,6 +657,14 @@ export const settingsApi = {
   // sidestep JS Number precision loss on 19-digit Snowflake IDs.
   updateSidecar: (data: { defaultVisionModelId: number | string | null; defaultVideoModelId: number | string | null }) =>
     http.put('/settings/sidecar', data),
+}
+
+// ==================== Global outbound proxy ====================
+export const proxyApi = {
+  get: () => http.get('/settings/proxy'),
+  update: (data: { enabled: boolean; url: string; nonProxyHosts?: string }) =>
+    http.put('/settings/proxy', data),
+  test: (url: string) => http.post('/settings/proxy/test', { url }),
 }
 
 // ==================== Workspace ====================
@@ -838,6 +861,16 @@ export const wikiApi = {
   getPageCitations: (kbId: number | string, pageId: number | string) =>
     http.get(`/wiki/kb/${kbId}/pages/${pageId}/citations`),
 
+  // Entity-level knowledge graph
+  listEntities: (kbId: number | string, params?: { type?: string; limit?: number }) =>
+    http.get(`/wiki/kb/${kbId}/entities`, { params }),
+  getEntityGraph: (kbId: number | string, limit = 150) =>
+    http.get(`/wiki/kb/${kbId}/entity-graph`, { params: { limit } }),
+  getEntityEgo: (kbId: number | string, entityId: number | string, limit = 50) =>
+    http.get(`/wiki/kb/${kbId}/entities/${entityId}/graph`, { params: { limit } }),
+  extractEntities: (kbId: number | string, force = false) =>
+    http.post(`/wiki/kb/${kbId}/entities/extract`, null, { params: { force } }),
+
   // RFC-030: Jobs
   getWikiJobs: (kbId: number, rawId: number) =>
     http.get(`/wiki/kb/${kbId}/jobs`, { params: { rawId } }),
@@ -871,6 +904,7 @@ export const wikiApi = {
     outputTarget?: 'none' | 'page'
     outputFormat?: 'markdown' | 'json'
     outputSchema?: string | null
+    targetPageType?: string | null
   }) =>
     http.post('/wiki/transformations', data),
   updateTransformation: (id: number, data: {
@@ -883,6 +917,7 @@ export const wikiApi = {
     outputTarget?: 'none' | 'page'
     outputFormat?: 'markdown' | 'json'
     outputSchema?: string | null
+    targetPageType?: string | null
   }) =>
     http.put(`/wiki/transformations/${id}`, data),
   deleteTransformation: (id: number) =>
@@ -913,6 +948,8 @@ export const wikiApi = {
     http.post(`/wiki/knowledge-bases/${kbId}/page-type-profile/validate`, { config }),
   resetPageTypeProfile: (kbId: string | number) =>
     http.post(`/wiki/knowledge-bases/${kbId}/page-type-profile/reset-default`),
+  reclassifyKB: (kbId: string | number, modelId?: string | number | null) =>
+    http.post(`/wiki/knowledge-bases/${kbId}/reclassify`, modelId != null ? { modelId } : {}),
 
   // ---- Agent pageType permissions (REQ-3) ----
   listPageTypePermissions: (kbId: string | number, agentId: string | number) =>
@@ -934,6 +971,8 @@ export const wikiApi = {
     http.get(`/wiki/knowledge-bases/${kbId}/source-watcher`),
   triggerSourceWatcher: (kbId: string | number) =>
     http.post(`/wiki/knowledge-bases/${kbId}/source-watcher/scan`),
+  setWatcherEnabled: (kbId: string | number, enabled: boolean) =>
+    http.put(`/wiki/knowledge-bases/${kbId}/source-watcher/enabled`, { enabled }),
 
   // ---- Pipelines (REQ-5) ----
   listPipelines: (kbId: string | number) =>
@@ -980,6 +1019,12 @@ export const agentBindingApi = {
     http.get(`/agents/${agentId}/provider-preferences`),
   setProviderPreferences: (agentId: string | number, providerIds: string[]) =>
     http.put(`/agents/${agentId}/provider-preferences`, providerIds),
+  // Per-agent knowledge base access scope. Empty array = unrestricted
+  // (agent can reach every KB in its workspace). IDs are kept as strings
+  // for the Snowflake-precision contract.
+  listKbs: (agentId: string | number) => http.get(`/agents/${agentId}/kbs`),
+  setKbs: (agentId: string | number, kbIds: (string | number)[]) =>
+    http.put(`/agents/${agentId}/kbs`, kbIds),
 }
 
 // ==================== Dashboard ====================
@@ -1345,7 +1390,7 @@ export const goalApi = {
   }) => http.post<Goal>('/goals', data),
 
   findActive: (conversationId: string) =>
-    http.get<Goal | null>(`/goals/by-conversation/${conversationId}`),
+    http.get<Goal | null>(`/goals/by-conversation/${encId(conversationId)}`),
 
   get: (id: string) => http.get<Goal>(`/goals/${id}`),
 
@@ -1405,4 +1450,27 @@ export const approvalApi = {
     conversationId?: string
     limit?: number
   }) => http.get<ResolutionLog[]>('/approval/resolutions', { params }),
+}
+
+// ==================== 内置帮助文档 ====================
+
+export interface DocMeta {
+  slug: string
+  title: string
+}
+
+export interface DocContent {
+  slug: string
+  title: string
+  content: string
+}
+
+export const docsApi = {
+  /** 列出某语言下的全部帮助文档（slug + 标题）。 */
+  list: (lang: string) =>
+    http.get<DocMeta[]>('/docs', { params: { lang } }),
+
+  /** 读取单篇文档正文（已剥离 frontmatter）。 */
+  content: (lang: string, slug: string) =>
+    http.get<DocContent>('/docs/content', { params: { lang, slug } }),
 }

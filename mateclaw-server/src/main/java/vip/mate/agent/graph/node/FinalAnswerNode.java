@@ -8,6 +8,7 @@ import vip.mate.agent.graph.state.DirectToolOutput;
 import vip.mate.agent.graph.state.FinishReason;
 import vip.mate.agent.graph.state.MateClawStateAccessor;
 import vip.mate.agent.graph.state.SourceEvidenceLedger;
+import vip.mate.common.text.MarkdownNormalizer;
 import vip.mate.tool.document.GeneratedFileCache;
 
 import java.util.List;
@@ -39,12 +40,25 @@ public class FinalAnswerNode implements NodeAction {
      */
     private final GeneratedFileCache generatedFileCache;
 
+    /**
+     * Kill-switch for the deterministic Markdown cleanup applied to the answer
+     * body. {@code true} (default) runs {@link MarkdownNormalizer}; set to
+     * {@code false} to surface model output verbatim if a normalization edge
+     * case ever mangles a legitimate answer in production.
+     */
+    private final boolean markdownNormalizeEnabled;
+
     public FinalAnswerNode() {
-        this(null);
+        this(null, true);
     }
 
     public FinalAnswerNode(GeneratedFileCache generatedFileCache) {
+        this(generatedFileCache, true);
+    }
+
+    public FinalAnswerNode(GeneratedFileCache generatedFileCache, boolean markdownNormalizeEnabled) {
         this.generatedFileCache = generatedFileCache;
+        this.markdownNormalizeEnabled = markdownNormalizeEnabled;
     }
 
     @Override
@@ -161,6 +175,7 @@ public class FinalAnswerNode implements NodeAction {
         // validation so the validator sees the user-visible warning rather
         // than treating the fake link as a "reference".
         finalAnswer = scrubFakeUrls(finalAnswer);
+        finalAnswer = accessor.sourceEvidenceLedger().appendWikiSourceTable(finalAnswer);
 
         SourceEvidenceLedger.Validation validation = accessor.sourceEvidenceLedger().validateAnswer(finalAnswer);
         if (finishReason == FinishReason.NORMAL && !validation.valid()) {
@@ -168,6 +183,17 @@ public class FinalAnswerNode implements NodeAction {
             finalAnswer = appendEvidenceWarning(finalAnswer, validation.unsupportedReferences());
             log.warn("[FinalAnswerNode] Evidence insufficient for final answer, unsupportedReferences={}",
                     validation.unsupportedReferences());
+        }
+
+        // Deterministic Markdown cleanup on the model-generated answer body. LLMs
+        // routinely emit malformed Markdown (missing heading spaces, glued `---`,
+        // unaligned table pipes) that prompt rules fail to prevent; this fixes the
+        // mechanical defects before the answer is persisted / sent to channels.
+        // Verbatim tool output (RETURN_DIRECT) and approval-wait paths return early
+        // above and are intentionally left untouched. Gated so operators can turn
+        // the rewrite off (mate.agent.markdown-normalize-enabled=false).
+        if (markdownNormalizeEnabled) {
+            finalAnswer = MarkdownNormalizer.normalize(finalAnswer);
         }
 
         // Build the event list. Always carries the finish_reason event so
@@ -211,9 +237,9 @@ public class FinalAnswerNode implements NodeAction {
     }
 
     private static String appendEvidenceWarning(String answer, List<String> unsupportedReferences) {
-        return answer + "\n\n[证据不足] 以下源码引用未出现在已读取/搜索到的工具证据中："
+        return answer + "\n\n[证据不足] 以下引用未出现在本轮已读取/搜索到的工具证据中，或缺少有效来源标注："
                 + String.join(", ", unsupportedReferences)
-                + "。请继续读取相关文件后再下结论。";
+                + "。请继续检索/读取相关证据后再下结论。";
     }
 
     /**

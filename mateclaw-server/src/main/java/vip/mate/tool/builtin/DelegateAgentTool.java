@@ -324,6 +324,48 @@ public class DelegateAgentTool {
         return result.toToolResponse(target.getName());
     }
 
+    /**
+     * Delegate a task to an agent by id — used by per-step plan delegation so a
+     * plan step can run on a dedicated specialist agent. Resolves the target by
+     * id, then reuses {@link #delegateToAgent}'s isolated-child execution
+     * (sub-agent registry, event relay, depth guard). The parent {@link ChatOrigin}
+     * is forwarded so the child inherits channel / workspace binding. Returns the
+     * child's reply text, or an error string when the agent is missing/disabled.
+     */
+    public String delegateByAgentId(Long agentId, String task, ChatOrigin parentOrigin) {
+        if (agentId == null) {
+            return "[错误] 未指定委派 Agent。";
+        }
+        AgentEntity target = agentMapper.selectById(agentId);
+        if (target == null || !Boolean.TRUE.equals(target.getEnabled())) {
+            return "[错误] 未找到 id=" + agentId + " 的已启用 Agent。";
+        }
+        ChatOrigin origin = parentOrigin != null ? parentOrigin : ChatOrigin.EMPTY;
+        ToolContext ctx = origin.toToolContext();
+        // A graph-node-initiated delegation (e.g. a plan step) runs outside any
+        // tool-execution / delegation context, so resolveParentConversationId()
+        // would return null and the child conversation would be created with a
+        // null parent — leaking it into the user's top-level conversation list
+        // (the list filters on parentConversationId IS NULL). Seed a depth-0
+        // delegation frame carrying the parent conversation id from the
+        // ChatOrigin so the child is correctly parented and hidden, mirroring how
+        // a tool-initiated delegation gets its conv id from ToolExecutionContext.
+        String parentConvId = origin.conversationId();
+        boolean seedContext = parentConvId != null && !parentConvId.isBlank()
+                && ToolExecutionContext.conversationId() == null
+                && DelegationContext.parentConversationId() == null;
+        if (seedContext) {
+            DelegationContext.enter(parentConvId, Set.of(), parentConvId, null, 0);
+        }
+        try {
+            return delegateToAgent(target.getName(), task, false, ctx);
+        } finally {
+            if (seedContext) {
+                DelegationContext.exit();
+            }
+        }
+    }
+
     // ==================== Parallel delegation ====================
 
     @vip.mate.tool.ConcurrencyUnsafe("internally fans out to its own thread pool; outer executor must not double-parallelize")

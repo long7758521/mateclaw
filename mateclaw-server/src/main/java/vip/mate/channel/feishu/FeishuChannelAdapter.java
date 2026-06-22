@@ -86,6 +86,38 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
     /** 消息去重：最近处理过的 message_id */
     private final Set<String> processedMessageIds = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 群内 bot 别名缓存：chatId → 学到的别名集合（openId / unionId / userId / name）。
+     * <p>飞书 SDK 投递的 mention 里，bot 的标识可能是群内自定义别名（{@code ou_357e...} / 自定义名称），
+     * 而不是 {@code /bot/v3/info} 返回的全局 openId / app_name。我们在双投递场景下
+     * 机会性地学习这些别名，后续单事件投递的消息就能命中缓存。
+     */
+    private final ConcurrentHashMap<String, Set<String>> chatBotAliases = new ConcurrentHashMap<>();
+
+    /** Max learned aliases retained per chat, to bound memory on busy groups. */
+    private static final int CHAT_ALIAS_MAX = 64;
+
+    /**
+     * Per-messageId mention tracker（带 TTL）。
+     * <p>飞书 SDK 经常对同一条消息双投递：一份 mentions 含 bot 的<em>全局身份</em>（来自 /bot/v3/info），
+     * 另一份含 bot 的<em>群内别名</em>。我们累积同一 messageId 下<em>单 mention</em>投递看到的标识，
+     * 一旦其中任何一份被识别为 @bot，就把累积的标识写入 {@link #chatBotAliases}。
+     * <p>只累积单 mention 投递是有意为之：多 mention 投递（如 {@code @bot @某人}）会把 bot 与
+     * 被同时 @ 的人混在一起，无法区分，若整体学习会把人误学成 bot 别名，导致之后 @ 该人的消息
+     * 被误判为 @bot。而飞书双投递里 bot 别名那一份本身就是单 mention，所以这样既安全又不丢功能。
+     */
+    private final ConcurrentHashMap<String, MentionTrack> mentionTracker = new ConcurrentHashMap<>();
+
+    /** mention tracker 条目 TTL（60s 远大于双投递的真实间隔，几个 ms 级别）。 */
+    private static final long MENTION_TRACK_TTL_MS = 60_000L;
+
+    /** Package-private for testing. */
+    static final class MentionTrack {
+        final Set<String> seenIds = ConcurrentHashMap.newKeySet();
+        final long createdAtMs = System.currentTimeMillis();
+        volatile boolean matched = false;
+    }
+
     /** 昵称缓存：open_id → 显示名称 */
     private final ConcurrentHashMap<String, String> nicknameCache = new ConcurrentHashMap<>();
     private static final int NICKNAME_CACHE_MAX = 500;
@@ -113,6 +145,9 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
 
     /** Bot's own open_id, fetched once from /open-apis/bot/v3/info and cached. */
     private volatile String botOpenId;
+
+    /** Bot's display name (app_name), fetched alongside open_id. Used for name-based mention matching. */
+    private volatile String botName;
 
     /** Serializes lazy bot-open-id fetches so concurrent group messages share one API roundtrip. */
     private final Object botOpenIdLock = new Object();
@@ -187,10 +222,14 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
 
     record RecentFileEntry(String fileName, String path, String fileUrl, String contentType) {}
 
-    private final Cache<String, List<RecentFileEntry>> recentFileCache = Caffeine.newBuilder()
+    // Package-private for testing: seed the cache directly to verify injection paths.
+    final Cache<String, List<RecentFileEntry>> recentFileCache = Caffeine.newBuilder()
             .expireAfterWrite(RECENT_FILE_TTL_MINUTES, TimeUnit.MINUTES)
             .maximumSize(200)
             .build();
+
+    // Package-private for testing: redirect to a temp directory without touching real disk.
+    Path chatUploadsRoot = Path.of("data", "chat-uploads");
 
     public FeishuChannelAdapter(ChannelEntity channelEntity,
                                 ChannelMessageRouter messageRouter,
@@ -331,9 +370,12 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         // a torn write that could re-cache a stale id.
         synchronized (botOpenIdLock) {
             this.botOpenId = null;
+            this.botName = null;
             this.botOpenIdLastFailureMs = 0L;
         }
         this.processedMessageIds.clear();
+        this.chatBotAliases.clear();
+        this.mentionTracker.clear();
         this.nicknameCache.clear();
         this.quotedMessageCache.clear();
         log.info("[feishu] Feishu channel stopped");
@@ -643,14 +685,109 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
             senderOpenId = sender.getSenderId().getOpenId();
         }
 
-        boolean isBotMentioned = isBotMentionedInEvent(message.getMentions());
+        com.lark.oapi.service.im.v1.model.MentionEvent[] mentions = message.getMentions();
+        boolean isBotMentioned = detectBotMentionWithLearning(mentions, chatId, messageId);
         handleFeishuMessage(messageId, messageType, contentStr, chatId, chatType, senderOpenId, parentId, isBotMentioned, event);
     }
 
     // ==================== @提及检测 ====================
 
-    private boolean isBotMentionedInEvent(com.lark.oapi.service.im.v1.model.MentionEvent[] mentions) {
-        return eventMentionsContainBot(mentions, getBotOpenId());
+    /**
+     * 判断本次事件是否 @ 了 bot，并机会性地学习"群内 bot 别名"。
+     *
+     * <p>飞书 SDK 在群内对同一条 @bot 的消息会双投递两个事件，两次的 mentions 数据形态不同：
+     * <ul>
+     *   <li>一份带 bot 的<em>全局身份</em>（与 {@code /open-apis/bot/v3/info} 返回的 openId / app_name 一致）；</li>
+     *   <li>一份带 bot 的<em>群内别名</em>（用户给 bot 起的 chat-scope 名，openId 也是另一套）。</li>
+     * </ul>
+     * 重启后第一条消息能命中"全局身份"那一份直接匹配；后续消息往往只来一份"群内别名"。
+     * 本方法在双投递可见时把两份的所有标识聚合到 {@link #chatBotAliases}，后续单事件投递就能命中缓存放行。
+     *
+     * <p>识别顺序：
+     * <ol>
+     *   <li>直接匹配 {@code /bot/v3/info} 拿到的 botOpenId / botName；</li>
+     *   <li>查 {@link #chatBotAliases} 缓存里学到的群内别名；</li>
+     *   <li>双投递推断：同一 messageId 之前的事件已被识别 → 本事件的 mentions 也是 bot 的别名。</li>
+     * </ol>
+     */
+    private boolean detectBotMentionWithLearning(com.lark.oapi.service.im.v1.model.MentionEvent[] mentions,
+                                                 String chatId, String messageId) {
+        return detectBotMentionWithLearning(mentions, chatId, messageId, getBotOpenId(), botName);
+    }
+
+    /** Package-private for testing: 纯有状态核心，bot 身份由调用方显式传入（避免触发 /bot/v3/info HTTP）。 */
+    boolean detectBotMentionWithLearning(com.lark.oapi.service.im.v1.model.MentionEvent[] mentions,
+                                         String chatId, String messageId,
+                                         String botOpenId, String botName) {
+        if (mentions == null || mentions.length == 0) {
+            return false;
+        }
+
+        cleanupMentionTracker();
+
+        // 把本次事件看到的所有标识累积到 per-messageId tracker —— 即使本次匹配不上，
+        // 后到的事件如果匹配成功，learnFromTrack 会把它们一起 cache。
+        MentionTrack track = null;
+        if (messageId != null) {
+            track = mentionTracker.computeIfAbsent(messageId, k -> new MentionTrack());
+            // Only single-mention deliveries are unambiguous bot identities. A
+            // multi-mention delivery (e.g. @bot @alice) mixes the bot with
+            // co-mentioned humans that must NOT be learned as aliases; Feishu's
+            // dual-delivery alias form is itself a single mention, so this is safe.
+            if (mentions.length == 1) {
+                collectMentionIdentifiers(mentions, track.seenIds);
+            }
+        }
+
+        // 1. 直接匹配 bot 的全局身份
+        if (eventMentionsContainBot(mentions, botOpenId, botName)) {
+            learnFromTrack(chatId, track);
+            if (track != null) track.matched = true;
+            return true;
+        }
+
+        // 2. 群内已学习别名命中
+        if (chatId != null) {
+            Set<String> learned = chatBotAliases.get(chatId);
+            if (learned != null && mentionMatchesAnyAlias(mentions, learned)) {
+                log.info("[feishu] @bot matched via learned chat alias: chatId={}, messageId={}", chatId, messageId);
+                learnFromTrack(chatId, track);
+                if (track != null) track.matched = true;
+                return true;
+            }
+        }
+
+        // 3. 双投递学习：同 messageId 的另一次投递已被识别 → 本事件 mentions 是 bot 别名
+        if (track != null && track.matched) {
+            log.info("[feishu] @bot inferred via dual-delivery learning: chatId={}, messageId={}", chatId, messageId);
+            learnFromTrack(chatId, track);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void learnFromTrack(String chatId, MentionTrack track) {
+        if (chatId == null || track == null || track.seenIds.isEmpty()) return;
+        Set<String> aliases = chatBotAliases.computeIfAbsent(chatId, k -> ConcurrentHashMap.newKeySet());
+        if (aliases.size() >= CHAT_ALIAS_MAX) return;
+        int before = aliases.size();
+        aliases.addAll(track.seenIds);
+        int added = aliases.size() - before;
+        if (added > 0) {
+            log.info("[feishu] Learned {} new bot alias(es) for chat={} (cache size={})",
+                    added, chatId, aliases.size());
+        }
+    }
+
+    private void cleanupMentionTracker() {
+        evictStaleTracks(mentionTracker, System.currentTimeMillis(), MENTION_TRACK_TTL_MS);
+    }
+
+    /** Package-private for testing: 按 TTL 淘汰 mention tracker 中的过期项（{@code nowMs} 显式传入便于测试）。 */
+    static void evictStaleTracks(Map<String, MentionTrack> tracker, long nowMs, long ttlMs) {
+        long cutoff = nowMs - ttlMs;
+        tracker.entrySet().removeIf(e -> e.getValue().createdAtMs < cutoff);
     }
 
     private boolean isBotMentionedInWebhookMessage(Map<String, Object> message) {
@@ -659,12 +796,51 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         return webhookMentionsContainBot(list, getBotOpenId());
     }
 
-    /** Package-private for testing: 判断 SDK mentions 数组中是否包含指定 open_id */
+    /** Package-private for testing: 判断 SDK mentions 数组中是否包含指定 bot（按 openId / unionId / userId / name 命中） */
     static boolean eventMentionsContainBot(com.lark.oapi.service.im.v1.model.MentionEvent[] mentions,
-                                           String botOpenId) {
-        if (mentions == null || mentions.length == 0 || botOpenId == null) return false;
+                                           String botOpenId, String botName) {
+        if (mentions == null || mentions.length == 0) return false;
         for (var mention : mentions) {
-            if (mention.getId() != null && botOpenId.equals(mention.getId().getOpenId())) return true;
+            var id = mention.getId();
+            // 匹配 openId、unionId、userId 中的任意一个
+            if (id != null && botOpenId != null) {
+                if (botOpenId.equals(id.getOpenId())) return true;
+                if (botOpenId.equals(id.getUnionId())) return true;
+                if (botOpenId.equals(id.getUserId())) return true;
+            }
+            // 飞书 SDK 对 bot mention 可能使用不同 ID 体系，fallback 到 name 匹配
+            if (botName != null && botName.equals(mention.getName())) return true;
+        }
+        return false;
+    }
+
+    /** Package-private for testing: 把 mentions 中每个非空 openId / unionId / userId / name 灌入 sink。 */
+    static void collectMentionIdentifiers(com.lark.oapi.service.im.v1.model.MentionEvent[] mentions,
+                                          Set<String> sink) {
+        if (mentions == null || sink == null) return;
+        for (var mention : mentions) {
+            var id = mention.getId();
+            if (id != null) {
+                if (id.getOpenId() != null) sink.add(id.getOpenId());
+                if (id.getUnionId() != null) sink.add(id.getUnionId());
+                if (id.getUserId() != null) sink.add(id.getUserId());
+            }
+            if (mention.getName() != null) sink.add(mention.getName());
+        }
+    }
+
+    /** Package-private for testing: mentions 中是否有任意 openId / unionId / userId / name 命中 aliases 集合。 */
+    static boolean mentionMatchesAnyAlias(com.lark.oapi.service.im.v1.model.MentionEvent[] mentions,
+                                          Set<String> aliases) {
+        if (mentions == null || mentions.length == 0 || aliases == null || aliases.isEmpty()) return false;
+        for (var mention : mentions) {
+            var id = mention.getId();
+            if (id != null) {
+                if (id.getOpenId() != null && aliases.contains(id.getOpenId())) return true;
+                if (id.getUnionId() != null && aliases.contains(id.getUnionId())) return true;
+                if (id.getUserId() != null && aliases.contains(id.getUserId())) return true;
+            }
+            if (mention.getName() != null && aliases.contains(mention.getName())) return true;
         }
         return false;
     }
@@ -734,7 +910,10 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                 Map<?, ?> bot = (Map<?, ?>) body.get("bot");
                 if (bot != null && bot.get("open_id") instanceof String openId && !openId.isBlank()) {
                     botOpenId = openId;
-                    log.info("[feishu] Bot open_id fetched and cached: {}", openId);
+                    if (bot.get("app_name") instanceof String name && !name.isBlank()) {
+                        botName = name;
+                    }
+                    log.info("[feishu] Bot info fetched: open_id={}, name={}", openId, botName);
                     return openId;
                 }
                 // 2xx with no bot.open_id field → treat as transient failure.
@@ -794,6 +973,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(apiBase + "/open-apis/auth/v3/tenant_access_token/internal"))
                     .header("Content-Type", "application/json; charset=utf-8")
+                    .timeout(Duration.ofSeconds(10))
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                     .build();
 
@@ -940,10 +1120,16 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         // prompt only exposes the file name (not its path) to the model — so if this id does
         // not match, ReadFileTool / DocumentExtractTool cannot find the cached file.
         String shortSuffix = generateShortSessionSuffix(chatId, senderOpenId, isGroup);
+        // 群会话改用完整 chatId，但存量旧会话仍在 legacy 后缀下：读时别名回退，
+        // 让升级前已存在的群沿用旧 conversationId 延续，不重写存量行。
+        if (isGroup && chatId != null) {
+            shortSuffix = resolveGroupSessionSuffix(chatId);
+        }
         String conversationId = buildConversationId(shortSuffix, senderOpenId, isGroup);
 
+        String stagedUploadPath = null;
         if (isFileMessage) {
-            cacheRecentFile(messageId, messageType, contentStr, conversationId);
+            stagedUploadPath = cacheRecentFile(messageId, messageType, contentStr, conversationId);
         }
 
         // require_mention 群聊过滤：群聊中必须 @机器人才响应。
@@ -979,7 +1165,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
 
         // 解析消息内容
         List<MessageContentPart> contentParts = new ArrayList<>();
-        String textContent = extractContentParts(messageId, messageType, contentStr, contentParts);
+        String textContent = extractContentParts(messageId, messageType, contentStr, contentParts, stagedUploadPath);
 
         if (contentParts.isEmpty() && (textContent == null || textContent.isBlank())) {
             log.debug("[feishu] Empty message content, ignoring");
@@ -1379,19 +1565,22 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         return null;
     }
 
-    // ==================== 会话 ID 优化 ====================
+    // ==================== 会话 ID ====================
 
     /**
-     * 生成更短的会话标识后缀
-     * - 群聊：app_id 后 4 位 + "_" + chat_id 后 8 位
-     * - 私聊：open_id 后 12 位
+     * 生成会话标识后缀。
+     * <ul>
+     *   <li>群聊：直接使用完整 {@code chatId}（全局唯一）。旧实现用 {@code {appId后4}_{chatId后8}}
+     *       截断后缀，不同群的 {@code chatId} 后 8 位可能相同 → 会话串台。改用完整 chatId 消除碰撞。
+     *       存量旧会话不重写，由 {@link #resolveGroupSessionSuffix} 做读时别名回退。</li>
+     *   <li>私聊：保持原状（取 {@code openId} 后 12 位）。注意私聊路径下该后缀实际不参与
+     *       conversationId——{@link #buildConversationId} 对 DM 直接用完整 {@code senderOpenId}，
+     *       故私聊会话 ID 不受本次改动影响。</li>
+     * </ul>
      */
     private String generateShortSessionSuffix(String chatId, String openId, boolean isGroup) {
         if (isGroup && chatId != null) {
-            String appId = getConfigString("app_id", "");
-            String appSuffix = appId.length() >= 4 ? appId.substring(appId.length() - 4) : appId;
-            String chatSuffix = chatId.length() >= 8 ? chatId.substring(chatId.length() - 8) : chatId;
-            return appSuffix + "_" + chatSuffix;
+            return chatId;
         }
         if (openId != null) {
             return openId.length() >= 12 ? openId.substring(openId.length() - 12) : openId;
@@ -1400,6 +1589,49 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
             return chatId.length() >= 12 ? chatId.substring(chatId.length() - 12) : chatId;
         }
         return null;
+    }
+
+    /**
+     * 旧群会话后缀算法：{@code {appId后4}_{chatId后8}}。仅用于读时别名回退——
+     * 在不重写存量行的前提下，让升级前已存在的群会话沿用旧 conversationId 无缝延续。
+     */
+    // Package-private for testing.
+    String legacyGroupSuffix(String chatId) {
+        if (chatId == null) return null;
+        String appId = getConfigString("app_id", "");
+        String appSuffix = appId.length() >= 4 ? appId.substring(appId.length() - 4) : appId;
+        String chatSuffix = chatId.length() >= 8 ? chatId.substring(chatId.length() - 8) : chatId;
+        return appSuffix + "_" + chatSuffix;
+    }
+
+    /**
+     * 群会话后缀的读时别名回退（不重写存量）：
+     * <ul>
+     *   <li>新群（两个 key 都无会话）→ 用完整 chatId 的 canonical key；</li>
+     *   <li>已迁移群（canonical key 已有会话）→ 用 canonical；</li>
+     *   <li>存量群（canonical 无、legacy 有）→ 沿用 legacy key，历史无缝延续。</li>
+     * </ul>
+     */
+    // Package-private for testing.
+    String resolveGroupSessionSuffix(String chatId) {
+        String canonical = chatId;
+        String legacy = legacyGroupSuffix(chatId);
+        if (legacy == null || legacy.equals(canonical)) return canonical;
+        boolean canonicalExists = messageRouter.conversationExists(CHANNEL_TYPE + ":" + canonical);
+        boolean legacyExists = !canonicalExists
+                && messageRouter.conversationExists(CHANNEL_TYPE + ":" + legacy);
+        String picked = pickGroupSessionSuffix(canonical, legacy, canonicalExists, legacyExists);
+        if (picked.equals(legacy)) {
+            log.info("[feishu] Reusing legacy group session id for chat={} (read-time alias, no migration write)", chatId);
+        }
+        return picked;
+    }
+
+    /** Package-private for testing: 纯选择逻辑——存量 legacy 会话存在且尚未迁移时沿用 legacy，否则用 canonical。 */
+    static String pickGroupSessionSuffix(String canonical, String legacy,
+                                         boolean canonicalExists, boolean legacyExists) {
+        if (!canonicalExists && legacyExists) return legacy;
+        return canonical;
     }
 
     /**
@@ -1431,10 +1663,17 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
      * ({@code ReadFileTool}, {@code DocumentExtractTool}) can find it
      * via {@code ChatUploadResolver}, and it gets cleaned up when the
      * conversation is deleted.
+     *
+     * @return absolute path of the staged {@code data/chat-uploads/} copy, or
+     *         {@code null} when nothing was cached (unsupported type, missing
+     *         file key, download failure). Callers stamp this path onto the
+     *         current-message content part so the path surfaced to the LLM is
+     *         resolver-reachable instead of the sandbox-external media path.
      */
-    private void cacheRecentFile(String messageId, String messageType, String contentStr,
+    private String cacheRecentFile(String messageId, String messageType, String contentStr,
                                   String conversationId) {
         try {
+            log.info("[feishu] cacheRecentFile: type={}, conversationId={}, messageId={}", messageType, conversationId, messageId);
             Map<String, Object> contentObj = objectMapper.readValue(contentStr, Map.class);
 
             String fileKey = null;
@@ -1461,20 +1700,20 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                     type = "file";
                 }
                 default -> {
-                    return;
+                    return null;
                 }
             }
 
-            if (fileKey == null) return;
+            if (fileKey == null) return null;
 
             // Download file bytes
             DownloadedResource dl = "image".equals(messageType)
                     ? maybeDownloadImage(messageId, fileKey)
                     : maybeDownloadResource(messageId, fileKey, type, fileName);
-            if (dl == null) return;
+            if (dl == null) return null;
 
             // Save to data/chat-uploads/{conversationId}/
-            Path uploadDir = Path.of("data", "chat-uploads", conversationId);
+            Path uploadDir = chatUploadsRoot.resolve(conversationId);
             Files.createDirectories(uploadDir);
             String rawName = (dl.fileName() != null && !dl.fileName().isBlank())
                     ? dl.fileName() : fileKey;
@@ -1502,8 +1741,10 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
             log.info("[feishu] Cached recent file for conversation={}: {} ({} bytes, {})",
                     conversationId, entry.fileName(), Files.size(dest), contentType);
 
+            return dest.toAbsolutePath().toString();
         } catch (Exception e) {
-            log.debug("[feishu] Failed to cache recent file: {}", e.getMessage());
+            log.warn("[feishu] Failed to cache recent file for conversation={}: {}", conversationId, e.getMessage(), e);
+            return null;
         }
     }
 
@@ -1514,9 +1755,17 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
      *
      * @return updated textContent with file descriptions appended
      */
-    private String injectRecentFiles(String conversationId, List<MessageContentPart> parts, String textContent) {
+    // Package-private for testing.
+    String injectRecentFiles(String conversationId, List<MessageContentPart> parts, String textContent) {
         List<RecentFileEntry> recent = recentFileCache.getIfPresent(conversationId);
-        if (recent == null || recent.isEmpty()) return textContent;
+        if (recent == null || recent.isEmpty()) {
+            // Fallback: scan data/chat-uploads/{conversationId}/ on disk.
+            // Survives process restart / Caffeine TTL expiry / GC eviction.
+            recent = loadRecentFilesFromDisk(conversationId);
+            if (recent.isEmpty()) return textContent;
+            log.info("[feishu] injectRecentFiles: cache miss, recovered {} file(s) from disk for conversation={}",
+                    recent.size(), conversationId);
+        }
 
         // Collect paths already in parts to avoid duplicates
         Set<String> existingPaths = new java.util.HashSet<>();
@@ -1546,20 +1795,111 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
         return text.toString();
     }
 
+    /**
+     * Scan {@code data/chat-uploads/{conversationId}/} on disk and return
+     * the most recent files as {@link RecentFileEntry}s.  Used as a
+     * fallback when the in-memory Caffeine cache has been evicted
+     * (process restart, TTL expiry, GC pressure) but the staged copies
+     * are still on disk.
+     */
+    private List<RecentFileEntry> loadRecentFilesFromDisk(String conversationId) {
+        long cutoff = System.currentTimeMillis() - RECENT_FILE_TTL_MINUTES * 60_000L;
+        return loadRecentFilesFromDisk(chatUploadsRoot.resolve(conversationId), cutoff);
+    }
+
+    /**
+     * Package-private for testing: explicit {@code dir} and {@code cutoffMs} make the
+     * test deterministic without temp-directory path construction or time mocking.
+     * Production callers go through {@link #loadRecentFilesFromDisk(String)}.
+     */
+    List<RecentFileEntry> loadRecentFilesFromDisk(Path dir, long cutoffMs) {
+        if (!Files.isDirectory(dir)) return List.of();
+        try (var stream = Files.list(dir)) {
+            return stream
+                    .filter(Files::isRegularFile)
+                    .filter(p -> {
+                        try {
+                            return Files.getLastModifiedTime(p).toMillis() >= cutoffMs;
+                        } catch (Exception e) {
+                            return true;
+                        }
+                    })
+                    .sorted((a, b) -> {
+                        try {
+                            return Long.compare(
+                                    Files.getLastModifiedTime(b).toMillis(),
+                                    Files.getLastModifiedTime(a).toMillis());
+                        } catch (Exception e) {
+                            return 0;
+                        }
+                    })
+                    .limit(RECENT_FILE_MAX_PER_CHAT)
+                    .map(p -> {
+                        String fileName = p.getFileName().toString();
+                        // Strip timestamp prefix (e.g. "1777391026594_report.pdf" → "report.pdf")
+                        int sep = fileName.indexOf('_');
+                        String display = (sep > 0 && sep < 20) ? fileName.substring(sep + 1) : fileName;
+                        String contentType = guessContentType(p);
+                        return new RecentFileEntry(display, p.toAbsolutePath().toString(), null, contentType);
+                    })
+                    .toList();
+        } catch (Exception e) {
+            // warn (not debug): a failed disk scan silently drops recovered files, which
+            // reproduces the exact "bot can't see the file" symptom this fallback fixes.
+            log.warn("[feishu] Failed to scan disk for recent files in {}: {}", dir, e.getMessage(), e);
+            return List.of();
+        }
+    }
+
+    /** Best-effort content type from file extension. */
+    private static String guessContentType(Path p) {
+        String name = p.getFileName().toString().toLowerCase();
+        if (name.endsWith(".pdf")) return "application/pdf";
+        if (name.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        if (name.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        if (name.endsWith(".pptx")) return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        if (name.endsWith(".doc")) return "application/msword";
+        if (name.endsWith(".xls")) return "application/vnd.ms-excel";
+        if (name.endsWith(".ppt")) return "application/vnd.ms-powerpoint";
+        if (name.endsWith(".txt")) return "text/plain";
+        if (name.endsWith(".csv")) return "text/csv";
+        if (name.endsWith(".json")) return "application/json";
+        if (name.endsWith(".xml")) return "application/xml";
+        if (name.endsWith(".md")) return "text/markdown";
+        if (name.endsWith(".png")) return "image/png";
+        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+        if (name.endsWith(".gif")) return "image/gif";
+        if (name.endsWith(".webp")) return "image/webp";
+        if (name.endsWith(".mp3")) return "audio/mpeg";
+        if (name.endsWith(".ogg")) return "audio/ogg";
+        if (name.endsWith(".opus")) return "audio/opus";
+        if (name.endsWith(".wav")) return "audio/wav";
+        if (name.endsWith(".mp4")) return "video/mp4";
+        if (name.endsWith(".mov")) return "video/quicktime";
+        if (name.endsWith(".zip")) return "application/zip";
+        if (name.endsWith(".rar")) return "application/x-rar-compressed";
+        if (name.endsWith(".7z")) return "application/x-7z-compressed";
+        return "application/octet-stream";
+    }
+
     // ==================== 消息内容解析 ====================
 
     /**
      * 解析飞书消息内容为 contentParts
      *
-     * @param messageId   消息 ID（用于媒体下载）
-     * @param messageType 消息类型
-     * @param contentStr  消息内容 JSON 字符串
-     * @param parts       输出的 content parts
+     * @param messageId        消息 ID（用于媒体下载）
+     * @param messageType      消息类型
+     * @param contentStr       消息内容 JSON 字符串
+     * @param parts            输出的 content parts
+     * @param stagedUploadPath {@code cacheRecentFile} 复制到 {@code data/chat-uploads/}
+     *                         的绝对路径（可空）。非空时覆盖各附件 part 的 path，使其指向
+     *                         沙箱可达（经 {@code ChatUploadResolver}）的那一份，而不是
+     *                         沙箱外的 {@code ~/.mateclaw/media/} 路径。
      * @return 纯文本摘要
      */
     @SuppressWarnings("unchecked")
     private String extractContentParts(String messageId, String messageType, String contentStr,
-                                        List<MessageContentPart> parts) {
+                                        List<MessageContentPart> parts, String stagedUploadPath) {
         if (contentStr == null) return null;
 
         try {
@@ -1588,6 +1928,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                         DownloadedResource dl = maybeDownloadImage(messageId, imageKey);
                         MessageContentPart part = MessageContentPart.image(imageKey, null);
                         applyDownload(part, dl);
+                        if (stagedUploadPath != null) part.setPath(stagedUploadPath);
                         parts.add(part);
                     }
                     yield "[图片]";
@@ -1599,6 +1940,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                         DownloadedResource dl = maybeDownloadResource(messageId, fileKey, "file", fileName);
                         MessageContentPart part = MessageContentPart.file(fileKey, fileName, null);
                         applyDownload(part, dl);
+                        if (stagedUploadPath != null) part.setPath(stagedUploadPath);
                         parts.add(part);
                     }
                     yield "[文件: " + (fileName != null ? fileName : "") + "]";
@@ -1612,6 +1954,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                         DownloadedResource dl = maybeDownloadResource(messageId, fileKey, "file", "voice.opus");
                         MessageContentPart part = MessageContentPart.audio(fileKey, null);
                         applyDownload(part, dl);
+                        if (stagedUploadPath != null) part.setPath(stagedUploadPath);
                         // STT hop: inject the transcript as a sibling text part BEFORE
                         // the audio part so ChannelMessageRouter.buildPromptFromParts
                         // sees real content instead of just "[音频]". WeCom / DingTalk
@@ -1632,6 +1975,7 @@ public class FeishuChannelAdapter extends AbstractChannelAdapter implements Stre
                         DownloadedResource dl = maybeDownloadResource(messageId, fileKey, "file", fileName);
                         MessageContentPart part = MessageContentPart.video(fileKey, fileName);
                         applyDownload(part, dl);
+                        if (stagedUploadPath != null) part.setPath(stagedUploadPath);
                         parts.add(part);
                     }
                     yield "[视频]";

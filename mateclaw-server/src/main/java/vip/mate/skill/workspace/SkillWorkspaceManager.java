@@ -47,10 +47,36 @@ public class SkillWorkspaceManager {
     }
 
     /**
-     * 按约定解析 skill 工作区路径：{root}/{skillName}/
+     * Resolve the conventional skill workspace path: {@code {root}/{sanitizedName}}.
+     * <p>
+     * Deterministic in {@code skillName} alone (no filesystem-state dependency). The
+     * non-ASCII collision fixed in #254 comes from {@link #sanitizeNameForFs} preserving
+     * Unicode letters/digits, so distinct names already map to distinct directories. No
+     * {@code -hash} suffix is appended: skill names are charset-constrained, so two names
+     * sanitizing to the same string is not a real case, and keeping the bare name avoids
+     * changing the path scheme for every existing skill (which would orphan already-created
+     * workspaces with no migration).
      */
     public Path resolveConventionPath(String skillName) {
-        return getWorkspaceRoot().resolve(sanitizeName(skillName));
+        return getWorkspaceRoot().resolve(sanitizeNameForFs(skillName));
+    }
+
+    /**
+     * Sanitize a skill name into a filesystem-safe directory segment.
+     * <p>
+     * Keeps the same charset as the legacy {@code [a-zA-Z0-9_.-]} rule but additionally
+     * preserves Unicode letters/digits ({@code \p{L}\p{N}}), so non-ASCII names no longer
+     * collapse to underscores and collide (#254). Everything else — path separators,
+     * control characters, whitespace — becomes {@code _}. Hyphens are kept (not folded to
+     * {@code _}) so existing kebab-case skill paths (e.g. {@code browser-cdp}) are unchanged
+     * across upgrades; only the Unicode handling differs from the legacy behavior.
+     */
+    private String sanitizeNameForFs(String name) {
+        if (name == null || name.isBlank()) {
+            return "unnamed";
+        }
+        String cleaned = name.strip().replaceAll("[^\\p{L}\\p{N}_.\\-]", "_");
+        return cleaned.isEmpty() ? "unnamed" : cleaned;
     }
 
     /**
@@ -116,11 +142,18 @@ public class SkillWorkspaceManager {
             Files.createDirectories(workspaceDir.resolve("scripts"));
 
             Path skillMd = workspaceDir.resolve("SKILL.md");
-            if (overwrite || !Files.exists(skillMd)) {
-                String content = (initialContent != null && !initialContent.isBlank())
-                        ? initialContent
-                        : buildDefaultSkillMd(skillName);
+            String content = (initialContent != null && !initialContent.isBlank())
+                    ? initialContent
+                    : buildDefaultSkillMd(skillName);
+            if (overwrite) {
                 Files.writeString(skillMd, content);
+            } else {
+                // 原子创建，避免并发上传时的 TOCTOU 竞态
+                try {
+                    Files.writeString(skillMd, content, StandardOpenOption.CREATE_NEW);
+                } catch (FileAlreadyExistsException e) {
+                    // 另一线程已创建，跳过写入
+                }
             }
 
             log.info("Initialized skill workspace: {} (overwrite={})", workspaceDir, overwrite);

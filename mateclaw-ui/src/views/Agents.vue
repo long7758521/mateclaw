@@ -30,7 +30,18 @@
                   :class="{ warn: liveStuck > 0 }"
                 >{{ liveRunning }}</span>
               </button>
+              <button
+                class="view-seg"
+                :class="{ 'is-active': view === 'plans' }"
+                @click="setView('plans')"
+              >{{ t('agents.views.plans') }}</button>
             </div>
+            <button class="btn-secondary" style="display:inline-flex;align-items:center;gap:6px;" @click="router.push('/agents/create')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/>
+              </svg>
+              {{ t('agents.wizard.entry') }}
+            </button>
             <button class="btn-primary" @click="openCreateModal">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -56,6 +67,23 @@
                 {{ t(tab.key) }}
               </button>
             </div>
+          </div>
+          <!-- Tag filter (#146): orthogonal to the type/status tabs; click to
+               toggle, multi-select narrows by intersection (AND). -->
+          <div v-if="availableTags.length || activeTags.length" class="tag-filter-bar">
+            <span class="tag-filter-bar__label">{{ t('agents.tagFilter.label') }}</span>
+            <button v-for="tag in visibleTags" :key="tag" class="tag-filter-chip"
+              :class="{ active: activeTags.includes(tag) }" @click="toggleTag(tag)">
+              {{ tag }}
+            </button>
+            <input v-if="hasMoreTags" v-model="tagSearch" class="tag-filter-search"
+              :placeholder="t('agents.tagFilter.search')" />
+            <span v-if="tagSearch && !visibleTags.length" class="tag-filter-bar__empty">
+              {{ t('agents.tagFilter.noMatch') }}
+            </span>
+            <button v-if="activeTags.length" class="tag-filter-clear" @click="clearTagFilter">
+              {{ t('agents.tagFilter.clear') }}
+            </button>
           </div>
         </div>
 
@@ -86,6 +114,12 @@
                 <p class="agent-card__tagline">
                   {{ agentTagline(agent) || t('agents.messages.noTagline') }}
                 </p>
+                <div v-if="agentTags(agent).length" class="agent-card__tags">
+                  <span v-for="tag in agentTags(agent)" :key="tag" class="agent-card__tag"
+                    :class="{ active: activeTags.includes(tag) }" @click="toggleTag(tag)">
+                    {{ tag }}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -133,7 +167,10 @@
         </template>
 
         <!-- Live: what the team is doing right now -->
-        <LivePanel v-else />
+        <LivePanel v-else-if="view === 'live'" />
+
+        <!-- Plans: the team's plans as a step board -->
+        <PlanBoard v-else-if="view === 'plans'" />
       </div>
     </div>
     
@@ -227,7 +264,8 @@
             </button>
             <button v-if="editingAgent" class="modal-tab" :class="{ active: modalTab === 'wiki' }" @click="modalTab = 'wiki'">
               {{ t('agents.tabs.wiki', 'Wiki') }}
-              <span v-if="selectedKBId" class="tab-badge">1</span>
+              <span v-if="form.wikiDisabled" class="tab-badge tab-badge--off">{{ t('agents.binding.disableAllWikiBadge') }}</span>
+              <span v-else-if="selectedKbIds.length" class="tab-badge">{{ selectedKbIds.length }}</span>
             </button>
           </div>
 
@@ -318,15 +356,45 @@
             <div class="form-group full-width">
               <details class="advanced-prompt">
                 <summary class="advanced-prompt__summary">
-                  {{ t('agents.fields.extraInstructions') }}
+                  {{ t('agents.fields.advanced') }}
                 </summary>
+                <label class="form-label">{{ t('agents.fields.extraInstructions') }}</label>
                 <textarea v-model="profileForm.extra" class="form-textarea" rows="4" :placeholder="t('agents.placeholders.extraInstructions')"></textarea>
                 <p class="form-hint">{{ t('agents.fields.extraInstructionsHint') }}</p>
+                <div v-if="editingAgent" class="advanced-guide">
+                  <div class="advanced-guide__info">
+                    <span class="advanced-guide__title">{{ t('agents.guide.summary') }}</span>
+                    <p class="advanced-guide__desc">{{ t('agents.guide.desc') }}</p>
+                  </div>
+                  <AgentGuideEditor :agent-id="editingAgent.id" />
+                </div>
               </details>
             </div>
             <div class="form-group">
               <label class="form-label">{{ t('agents.fields.tags') }}</label>
-              <input v-model="form.tags" class="form-input" :placeholder="t('agents.placeholders.tags')" />
+              <div class="tags-editor" @click="($refs.tagInputEl as HTMLInputElement)?.focus()">
+                <span v-for="tag in tagList" :key="tag" class="tag-chip tag-chip--editable">
+                  {{ tag }}
+                  <button type="button" class="tag-chip__remove" @click.stop="removeTag(tag)">×</button>
+                </span>
+                <input
+                  ref="tagInputEl"
+                  v-model="tagInput"
+                  class="tags-editor__input"
+                  :placeholder="tagList.length ? '' : t('agents.placeholders.tags')"
+                  @keydown="onTagInputKeydown"
+                  @compositionstart="tagComposing = true"
+                  @compositionend="tagComposing = false; flushTagSeparators()"
+                  @blur="commitTagInput"
+                />
+              </div>
+              <p class="form-hint tags-hint">
+                <template v-if="recentlyRemovedTag">
+                  {{ t('agents.messages.tagRemoved', { tag: recentlyRemovedTag }) }}
+                  <button type="button" class="tags-undo" @click="undoRemoveTag">{{ t('agents.fields.tagUndo') }}</button>
+                </template>
+                <template v-else>{{ t('agents.fields.tagsHint') }}</template>
+              </p>
             </div>
             <div class="form-group">
               <label class="form-label">{{ t('agents.fields.enabled') }}</label>
@@ -563,35 +631,66 @@
               <span class="binding-intro__kicker">{{ t('agents.binding.wikiKicker') }}</span>
               <p class="binding-intro__tagline">{{ t('agents.binding.wikiTagline') }}</p>
             </div>
-            <p class="binding-hint">{{ t('agents.binding.wikiHint') }}</p>
-            <div v-if="availableKBs.length === 0" class="binding-empty">{{ t('agents.binding.noKBs') }}</div>
-            <div v-else class="binding-list">
-              <label
-                class="binding-item"
-                :class="{ selected: selectedKBId === null }"
-              >
-                <input type="radio" name="kb-select" :checked="selectedKBId === null" class="binding-checkbox" @change="selectedKBId = null" />
-                <span class="binding-icon">🚫</span>
-                <div class="binding-info">
-                  <span class="binding-name">{{ t('agents.binding.noKB') }}</span>
-                </div>
-              </label>
-              <label
-                v-for="kb in availableKBs"
-                :key="kb.id"
-                class="binding-item"
-                :class="{ selected: selectedKBId === String(kb.id) }"
-              >
-                <input type="radio" name="kb-select" :checked="selectedKBId === String(kb.id)" class="binding-checkbox" @change="selectedKBId = String(kb.id)" />
-                <span class="binding-icon">📚</span>
-                <div class="binding-info">
-                  <span class="binding-name">{{ kb.name }}</span>
-                  <span v-if="kb.description" class="binding-desc">{{ kb.description?.slice(0, 80) }}</span>
-                </div>
-                <!-- binding-version class reused for pageCount badge (same positioning as skill version) -->
-                <span v-if="kb.pageCount != null" class="binding-version">{{ t('agents.binding.wikiPages', { count: kb.pageCount }, `${kb.pageCount} pages`) }}</span>
+            <!-- Issue #304: explicit "no KBs" toggle. Empty selection alone
+                 falls through to "inherit workspace-wide" (every KB visible,
+                 context bloat for agents that don't need a KB), so an operator
+                 who wants zero KBs needs this dedicated bit — mirrors the
+                 skills_disabled / tools_disabled pattern. -->
+            <div class="binding-disable-row">
+              <label class="binding-disable-label">
+                <input type="checkbox" v-model="form.wikiDisabled" class="binding-disable-checkbox" />
+                <span class="binding-disable-text">
+                  <strong>{{ t('agents.binding.disableAllWiki') }}</strong>
+                  <span class="binding-disable-hint">{{ t('agents.binding.disableAllWikiHint') }}</span>
+                </span>
               </label>
             </div>
+            <p class="binding-hint">{{ t('agents.binding.wikiHint') }}</p>
+            <div v-if="availableKBs.length === 0" class="binding-empty">{{ t('agents.binding.noKBs') }}</div>
+            <template v-else>
+              <p class="binding-hint" :class="{ 'binding-hint--warn': !form.wikiDisabled && selectedKbIds.length > 0 }">
+                <template v-if="form.wikiDisabled">{{ t('agents.binding.wikiScopeNone') }}</template>
+                <template v-else>{{ selectedKbIds.length === 0 ? t('agents.binding.wikiScopeAll') : t('agents.binding.wikiScopeLimited', { count: selectedKbIds.length }) }}</template>
+              </p>
+              <div class="binding-list" :class="{ 'binding-list--disabled': form.wikiDisabled }">
+                <label
+                  v-for="kb in availableKBs"
+                  :key="kb.id"
+                  class="binding-item"
+                  :class="{
+                    selected: !form.wikiDisabled && isKbInScope(kb.id),
+                    'binding-item--inert': form.wikiDisabled,
+                  }"
+                >
+                  <!-- Manual :checked (not v-model) so flipping the toggle
+                       back on restores the previous picks in one click. Same
+                       inert-checkbox trick the skills picker uses (issue #184). -->
+                  <input
+                    type="checkbox"
+                    class="binding-checkbox"
+                    :checked="!form.wikiDisabled && isKbInScope(kb.id)"
+                    @change="toggleKbScope(kb.id)"
+                    :disabled="form.wikiDisabled"
+                  />
+                  <span class="binding-icon">📚</span>
+                  <div class="binding-info">
+                    <span class="binding-name">{{ kb.name }}</span>
+                    <span v-if="kb.description" class="binding-desc">{{ kb.description?.slice(0, 80) }}</span>
+                  </div>
+                  <!-- Primary toggle: only meaningful for in-scope KBs. -->
+                  <button
+                    type="button"
+                    class="kb-primary-toggle"
+                    :class="{ 'kb-primary-toggle--active': !form.wikiDisabled && selectedKBId === String(kb.id) }"
+                    :disabled="form.wikiDisabled"
+                    :title="t('agents.binding.wikiSetPrimary')"
+                    @click.prevent.stop="setPrimaryKb(kb.id)"
+                  >{{ selectedKBId === String(kb.id) ? t('agents.binding.wikiPrimary') : t('agents.binding.wikiSetPrimary') }}</button>
+                  <!-- binding-version class reused for pageCount badge (same positioning as skill version) -->
+                  <span v-if="kb.pageCount != null" class="binding-version">{{ t('agents.binding.wikiPages', { count: kb.pageCount }, `${kb.pageCount} pages`) }}</span>
+                </label>
+              </div>
+            </template>
           </div>
         </div>
         <div class="modal-footer">
@@ -606,7 +705,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { mcToast } from '@/composables/useMcToast'
@@ -616,6 +715,8 @@ import type { Agent } from '@/types/index'
 import SkillIcon from '@/components/common/SkillIcon.vue'
 import SkillIconPicker from '@/components/common/SkillIconPicker.vue'
 import LivePanel from '@/components/live/LivePanel.vue'
+import PlanBoard from '@/components/agents/PlanBoard.vue'
+import AgentGuideEditor from './Agents/components/AgentGuideEditor.vue'
 import {
   emptyProfile,
   parsePrompt,
@@ -636,6 +737,9 @@ const { resolveSkillName } = useSkillName()
 const agents = ref<Agent[]>([])
 const searchText = ref('')
 const activeFilter = ref('all')
+// Tag filter (#146) — orthogonal to activeFilter; multi-select with AND
+// (intersection) semantics. Empty array = no tag constraint.
+const activeTags = ref<string[]>([])
 const showModal = ref(false)
 const editingAgent = ref<Agent | null>(null)
 const modalTab = ref<'basic' | 'skills' | 'tools' | 'providers' | 'wiki'>('basic')
@@ -793,9 +897,45 @@ function onSkillToggle(skillId: number | string, event: Event) {
 }
 const selectedSkillIds = ref<number[]>([])
 const selectedToolNames = ref<string[]>([])
-// Agent-level primary wiki KB. KB visibility remains workspace-wide.
+// Agent wiki KB binding. `selectedKbIds` is the access scope: when non-empty
+// the agent can only reach those KBs; empty = unrestricted (every KB in the
+// workspace). `selectedKBId` is the default/primary KB among the scope, used
+// by wiki tools when no kbId/kbName is given. IDs are strings (Snowflake).
 const availableKBs = ref<any[]>([])
 const selectedKBId = ref<string | null>(null)
+const selectedKbIds = ref<string[]>([])
+
+function isKbInScope(id: string | number): boolean {
+  return selectedKbIds.value.includes(String(id))
+}
+
+/** Toggle a KB in/out of the access scope, keeping the primary consistent. */
+function toggleKbScope(id: string | number) {
+  const sid = String(id)
+  const idx = selectedKbIds.value.indexOf(sid)
+  if (idx >= 0) {
+    selectedKbIds.value.splice(idx, 1)
+    // Dropping the primary out of scope: fall back to another scoped KB.
+    if (selectedKBId.value === sid) {
+      selectedKBId.value = selectedKbIds.value[0] ?? null
+    }
+  } else {
+    selectedKbIds.value.push(sid)
+    // First KB added becomes the default primary automatically.
+    if (selectedKBId.value === null) {
+      selectedKBId.value = sid
+    }
+  }
+}
+
+/** Mark a KB as the default/primary; auto-adds it to the scope if needed. */
+function setPrimaryKb(id: string | number) {
+  const sid = String(id)
+  if (!selectedKbIds.value.includes(sid)) {
+    selectedKbIds.value.push(sid)
+  }
+  selectedKBId.value = sid
+}
 // RFC-009 PR-3: per-agent provider preference order
 const availableProviders = ref<{ id: string; name: string }[]>([])
 const selectedProviderIds = ref<string[]>([])
@@ -838,10 +978,80 @@ const defaultForm = (): Partial<Agent> & { name: string; defaultThinkingLevel: s
   // "zero rows = inherit global default" contract for newly-created agents.
   skillsDisabled: false,
   toolsDisabled: false,
+  // Issue #304 — same contract for the wiki/knowledge-base picker. Empty
+  // selection alone would fall through to "inherit workspace-wide", so an
+  // operator who wants zero KBs in the context needs this dedicated bit.
+  wikiDisabled: false,
 })
 
 const form = ref(defaultForm())
 const iconPickerVisible = ref(false)
+
+// Chip-style tag editor (#145). `form.tags` stays the comma-separated string
+// source of truth for the API; the chips render a derived array. The input
+// supports Enter / space / ASCII or full-width comma as separators, is
+// IME-safe (won't commit a half-composed Chinese token on the candidate-
+// confirming Enter), and offers a transient inline undo after removal.
+const tagInput = ref('')
+const tagComposing = ref(false)
+const recentlyRemovedTag = ref<string | null>(null)
+let undoTimer: ReturnType<typeof setTimeout> | null = null
+
+// Stored value is comma-joined, so split on comma only — a stored tag may
+// legitimately contain spaces, which the input tokenizer (below) would split.
+const tagList = computed(() => (form.value.tags || '').split(',').map(s => s.trim()).filter(Boolean))
+
+function setTags(list: string[]) {
+  form.value.tags = list.join(',')
+}
+function addTags(tokens: string[]) {
+  const merged = [...tagList.value]
+  for (const raw of tokens) {
+    const tag = raw.trim()
+    if (tag && !merged.includes(tag)) merged.push(tag)
+  }
+  setTags(merged)
+}
+// Enter / blur: commit everything left in the box.
+function commitTagInput() {
+  addTags(tagInput.value.split(/[,，\s]+/))
+  tagInput.value = ''
+}
+// Live typing: once a separator (comma / full-width comma / whitespace) lands,
+// flush the completed tokens and keep any trailing partial in the box. v-model
+// already suppresses updates mid-IME-composition, so this only runs on settled
+// text; the guard is belt-and-suspenders.
+function flushTagSeparators() {
+  if (tagComposing.value || !/[,，\s]/.test(tagInput.value)) return
+  const tokens = tagInput.value.split(/[,，\s]+/)
+  const partial = /[,，\s]$/.test(tagInput.value) ? '' : (tokens.pop() ?? '')
+  addTags(tokens)
+  tagInput.value = partial
+}
+watch(tagInput, flushTagSeparators)
+
+function onTagInputKeydown(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    commitTagInput()
+  } else if (e.key === 'Backspace' && !tagInput.value && tagList.value.length) {
+    e.preventDefault()
+    removeTag(tagList.value[tagList.value.length - 1])
+  }
+}
+function removeTag(tag: string) {
+  setTags(tagList.value.filter(t => t !== tag))
+  recentlyRemovedTag.value = tag
+  if (undoTimer) clearTimeout(undoTimer)
+  undoTimer = setTimeout(() => { recentlyRemovedTag.value = null }, 5000)
+}
+function undoRemoveTag() {
+  if (!recentlyRemovedTag.value) return
+  addTags([recentlyRemovedTag.value])
+  recentlyRemovedTag.value = null
+  if (undoTimer) clearTimeout(undoTimer)
+}
 
 // Identity-triad fields displayed in the basic tab. Kept separate from
 // `form.systemPrompt` so the textarea state stays predictable while the
@@ -860,6 +1070,51 @@ function agentTagline(agent: Agent): string {
   return deriveTagline(profile, agent.description)
 }
 
+/** Parse an agent's comma-separated tags into a trimmed, non-empty, de-duped array. */
+function agentTags(agent: Agent): string[] {
+  const parsed = (agent.tags || '').split(',').map(t => t.trim()).filter(Boolean)
+  return [...new Set(parsed)]
+}
+
+// Distinct tags across all agents, ordered by frequency (most-used first) so
+// the filter bar surfaces the common categories. Hidden entirely when empty.
+const availableTags = computed(() => {
+  const freq = new Map<string, number>()
+  for (const a of agents.value) {
+    for (const tag of agentTags(a)) freq.set(tag, (freq.get(tag) ?? 0) + 1)
+  }
+  return [...freq.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(e => e[0])
+})
+
+// Cap the inline chips so a workspace with dozens of tags doesn't bury the
+// roster under a wall of chips. Beyond the cap, a search box appears.
+const TAG_FILTER_LIMIT = 12
+const tagSearch = ref('')
+const hasMoreTags = computed(() => availableTags.value.length > TAG_FILTER_LIMIT)
+
+// Chips actually rendered. When searching, show every name match (no cap).
+// Otherwise show the top-N frequent tags, but always append any selected tags
+// that fell outside the cap so they stay deselectable.
+const visibleTags = computed(() => {
+  const q = tagSearch.value.trim().toLowerCase()
+  if (q) return availableTags.value.filter(t => t.toLowerCase().includes(q))
+  const top = availableTags.value.slice(0, TAG_FILTER_LIMIT)
+  // Always surface selected tags outside the top-N — including ones that no
+  // longer exist on any agent (edited/deleted) — so they stay deselectable
+  // instead of silently filtering the roster with no chip to clear them.
+  const extraActive = activeTags.value.filter(t => !top.includes(t))
+  return [...top, ...extraActive]
+})
+
+function toggleTag(tag: string) {
+  const i = activeTags.value.indexOf(tag)
+  if (i >= 0) activeTags.value.splice(i, 1)
+  else activeTags.value.push(tag)
+}
+function clearTagFilter() {
+  activeTags.value = []
+}
+
 const filteredAgents = computed(() => {
   let list = agents.value
   if (searchText.value) {
@@ -874,22 +1129,32 @@ const filteredAgents = computed(() => {
   else if (activeFilter.value === 'plan_execute') list = list.filter(a => a.agentType === 'plan_execute')
   else if (activeFilter.value === 'enabled') list = list.filter(a => a.enabled)
   else if (activeFilter.value === 'disabled') list = list.filter(a => !a.enabled)
+  // Tag filter: intersection — an agent must carry every selected tag.
+  if (activeTags.value.length) {
+    list = list.filter(a => {
+      const tags = agentTags(a)
+      return activeTags.value.every(t => tags.includes(t))
+    })
+  }
   return list
 })
 
 // Roster ↔ Live view switch — admin only. The running/stuck counts feed the
 // segmented control's pulse + badge so you know whether Live is worth a look.
 const isAdminRole = computed(() => (localStorage.getItem('role') || 'user') === 'admin')
-const view = ref<'roster' | 'live'>(
-  route.query.view === 'live' && isAdminRole.value ? 'live' : 'roster',
+type AgentView = 'roster' | 'live' | 'plans'
+const view = ref<AgentView>(
+  isAdminRole.value && (route.query.view === 'live' || route.query.view === 'plans')
+    ? (route.query.view as AgentView)
+    : 'roster',
 )
 const liveRunning = ref(0)
 const liveStuck = ref(0)
 let livePollTimer: ReturnType<typeof setInterval> | null = null
 
-function setView(next: 'roster' | 'live') {
+function setView(next: AgentView) {
   view.value = next
-  router.replace({ query: next === 'live' ? { view: 'live' } : {} })
+  router.replace({ query: next === 'roster' ? {} : { view: next } })
 }
 
 async function refreshLiveCounts() {
@@ -952,6 +1217,8 @@ function openBlankCreateModal() {
   showTemplateSelector.value = false
   editingAgent.value = null
   form.value = defaultForm()
+  tagInput.value = ''
+  recentlyRemovedTag.value = null
   profileForm.value = emptyProfile()
   modalTab.value = 'basic'
   skillBindingSearch.value = ''
@@ -961,6 +1228,7 @@ function openBlankCreateModal() {
   selectedProviderIds.value = []
   availableKBs.value = []
   selectedKBId.value = null
+  selectedKbIds.value = []
   showModal.value = true
 }
 
@@ -1031,7 +1299,10 @@ async function openEditModal(agent: Agent) {
     primaryKbId: agent.primaryKbId != null ? String(agent.primaryKbId) : null,
     skillsDisabled: agent.skillsDisabled === true,
     toolsDisabled: agent.toolsDisabled === true,
+    wikiDisabled: (agent as any).wikiDisabled === true,
   }
+  tagInput.value = ''
+  recentlyRemovedTag.value = null
   profileForm.value = parsePrompt(agent.systemPrompt)
   modalTab.value = 'basic'
   skillBindingSearch.value = ''
@@ -1075,11 +1346,20 @@ async function openEditModal(agent: Agent) {
 
   // KB request is caught separately so its error message is accurate.
   try {
-    const kbsRes: any = await wikiApi.listBindableKBs()
+    const [kbsRes, kbBindRes]: any = await Promise.all([
+      wikiApi.listBindableKBs(),
+      agentBindingApi.listKbs(agent.id),
+    ])
     const bindableKBs = (kbsRes.data || []) as any[]
     availableKBs.value = bindableKBs
+    const bindableIds = new Set(bindableKBs.map((kb: any) => String(kb.id)))
+    // Access scope: keep only enabled rows that still resolve to a visible KB.
+    selectedKbIds.value = ((kbBindRes.data || []) as any[])
+      .filter((b: any) => b.enabled)
+      .map((b: any) => String(b.kbId))
+      .filter((id: string) => bindableIds.has(id))
     const primaryKbId = agent.primaryKbId != null ? String(agent.primaryKbId) : null
-    selectedKBId.value = primaryKbId && bindableKBs.some((kb: any) => String(kb.id) === primaryKbId)
+    selectedKBId.value = primaryKbId && bindableIds.has(primaryKbId)
       ? primaryKbId
       : null
   } catch {
@@ -1094,6 +1374,7 @@ function closeModal() {
   toolBindingSearch.value = ''
   availableKBs.value = []
   selectedKBId.value = null
+  selectedKbIds.value = []
 }
 
 async function saveAgent() {
@@ -1137,6 +1418,12 @@ async function saveAgent() {
         await agentBindingApi.setSkills(agentId, skillIdsToSave)
         await agentBindingApi.setTools(agentId, toolNamesToSave)
         await agentBindingApi.setProviderPreferences(agentId, selectedProviderIds.value)
+        // KB access scope. Issue #304: when wiki_disabled is on the agent
+        // sees zero KBs regardless of the binding list, so clear the save
+        // payload — same pattern as skills/tools above. Empty save leaves
+        // the wiki_disabled flag untouched (the toggle owns the bit).
+        const kbIdsToSave = form.value.wikiDisabled ? [] : selectedKbIds.value
+        await agentBindingApi.setKbs(agentId, kbIdsToSave)
       } catch (bindingError: any) {
         mcToast.error(bindingError?.message || t('agents.messages.saveFailed'))
         // Pull the authoritative server state back into the editing form so
@@ -1298,6 +1585,16 @@ html.dark .seg-count.warn {
 .filter-tab { padding: 8px 14px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 999px; font-size: 13px; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; font-weight: 600; }
 .filter-tab:hover { background: var(--mc-bg-sunken); }
 .filter-tab.active { background: var(--mc-primary-bg); border-color: var(--mc-primary); color: var(--mc-primary); font-weight: 500; }
+.tag-filter-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--mc-border); }
+.tag-filter-bar__label { font-size: 12px; color: var(--mc-text-tertiary); font-weight: 600; margin-right: 2px; }
+.tag-filter-chip { padding: 4px 12px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 999px; font-size: 12px; color: var(--mc-text-secondary); cursor: pointer; transition: all 0.15s; }
+.tag-filter-chip:hover { background: var(--mc-bg-sunken); }
+.tag-filter-chip.active { background: var(--mc-primary-bg); border-color: var(--mc-primary); color: var(--mc-primary); font-weight: 600; }
+.tag-filter-search { padding: 4px 10px; border: 1px solid var(--mc-border); background: var(--mc-bg-muted); border-radius: 999px; font-size: 12px; color: var(--mc-text-primary); width: 120px; outline: none; }
+.tag-filter-search:focus { border-color: var(--mc-primary); }
+.tag-filter-bar__empty { font-size: 12px; color: var(--mc-text-tertiary); }
+.tag-filter-clear { padding: 4px 10px; border: none; background: transparent; font-size: 12px; color: var(--mc-text-tertiary); cursor: pointer; text-decoration: underline; }
+.tag-filter-clear:hover { color: var(--mc-text-secondary); }
 
 /* Agent Card Grid */
 .agent-grid {
@@ -1381,6 +1678,11 @@ html.dark .seg-count.warn {
   text-overflow: ellipsis;
   letter-spacing: -0.005em;
 }
+
+.agent-card__tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.agent-card__tag { font-size: 11px; padding: 2px 8px; background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); border-radius: 999px; white-space: nowrap; cursor: pointer; transition: all 0.15s; }
+.agent-card__tag:hover { color: var(--mc-text-secondary); }
+.agent-card__tag.active { background: var(--mc-primary-bg); color: var(--mc-primary); font-weight: 600; }
 
 .agent-card__action-row {
   display: flex;
@@ -1593,6 +1895,26 @@ html.dark .seg-count.warn {
 .binding-desc { font-size: 12px; color: var(--mc-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* reused for KB pageCount badge in wiki tab */
 .binding-version { font-size: 11px; color: var(--mc-text-tertiary); flex-shrink: 0; }
+/* Highlighted scope hint when the agent is restricted to a KB subset */
+.binding-hint--warn { color: var(--mc-warning, #b8860b); }
+/* "Set default" / "Default" toggle for the primary KB in the wiki tab */
+.kb-primary-toggle {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--mc-border);
+  background: transparent;
+  color: var(--mc-text-tertiary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kb-primary-toggle:hover { border-color: var(--mc-primary); color: var(--mc-primary); }
+.kb-primary-toggle--active {
+  background: var(--mc-primary);
+  border-color: var(--mc-primary);
+  color: #fff;
+}
 .binding-type-badge {
   font-size: 10px; padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
   background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); text-transform: uppercase;
@@ -1697,6 +2019,15 @@ html.dark .seg-count.warn {
 }
 .advanced-prompt[open] > .advanced-prompt__summary { padding: 0 0 8px; border-bottom: 1px solid var(--mc-border-light); margin-bottom: 8px; }
 .advanced-prompt[open] > .advanced-prompt__summary::before { transform: rotate(90deg); }
+.advanced-prompt .form-textarea { width: 100%; box-sizing: border-box; }
+.advanced-guide {
+  margin-top: 16px; display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px; border-radius: 10px; background: var(--mc-bg-sunken);
+  border: 1px solid var(--mc-border-light);
+}
+.advanced-guide__info { flex: 1; min-width: 0; }
+.advanced-guide__title { display: block; font-size: 13px; font-weight: 600; color: var(--mc-text-primary); }
+.advanced-guide__desc { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--mc-text-tertiary); }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--mc-border-light); }
 
 @media (max-width: 900px) {
@@ -1731,6 +2062,15 @@ html.dark .seg-count.warn {
 
 .template-tags { display: flex; flex-wrap: wrap; gap: 4px; align-self: flex-start; margin-top: 2px; }
 .tag-chip { font-size: 11px; padding: 2px 8px; background: var(--mc-bg-sunken); color: var(--mc-text-tertiary); border-radius: 999px; white-space: nowrap; }
+
+.tags-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 38px; padding: 6px 10px; border: 1px solid var(--mc-border); border-radius: 8px; background: var(--mc-bg-sunken); cursor: text; transition: border-color 0.15s; }
+.tags-editor:focus-within { border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,0.1); }
+.tag-chip--editable { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; padding: 3px 4px 3px 10px; background: var(--mc-bg); color: var(--mc-text-secondary); border: 1px solid var(--mc-border); }
+.tag-chip__remove { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: 999px; background: var(--mc-bg-sunken); color: var(--mc-text-secondary); font-size: 15px; line-height: 1; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.tag-chip__remove:hover { background: var(--mc-danger, #e05656); color: #fff; }
+.tags-editor__input { flex: 1; min-width: 80px; border: none; outline: none; background: transparent; font-size: 14px; color: var(--mc-text-primary); padding: 2px 0; }
+.tags-hint { margin-top: 6px; }
+.tags-undo { border: none; background: transparent; padding: 0 2px; color: var(--mc-primary); font-size: inherit; cursor: pointer; text-decoration: underline; }
 
 /* RFC-090 §9.2 调整 B — Advanced Tools picker (collapsed by default) */
 .advanced-tools { border: 1px dashed var(--mc-border); border-radius: 12px; padding: 0; }

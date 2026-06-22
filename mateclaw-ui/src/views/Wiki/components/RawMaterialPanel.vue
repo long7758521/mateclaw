@@ -67,6 +67,29 @@
     </div>
     <div v-if="scanResult" class="scan-result">
       {{ t('wiki.scanResult', { scanned: scanResult.scanned, added: scanResult.added, skipped: scanResult.skipped }) }}
+      <div v-if="scanResult.errors?.length" class="scan-errors">
+        <span v-for="(err, i) in scanResult.errors" :key="i" class="scan-error-item">{{ err }}</span>
+      </div>
+    </div>
+
+    <!-- Auto-sync (per-KB source watcher): periodically scans the directory above -->
+    <div v-if="canManageWiki" class="auto-sync-row">
+      <label class="auto-sync-toggle" :class="{ disabled: !watcher.globalEnabled || watcher.busy }">
+        <input
+          type="checkbox"
+          :checked="watcher.kbEnabled"
+          :disabled="!watcher.globalEnabled || watcher.busy"
+          @change="toggleWatcher(($event.target as HTMLInputElement).checked)"
+        />
+        <span>{{ t('wiki.sources.autoSync') }}</span>
+      </label>
+      <span v-if="watcher.globalEnabled && watcher.kbEnabled" class="auto-sync-meta">
+        {{ t('wiki.sources.autoSyncInterval', { sec: Math.round(watcher.intervalMs / 1000) }) }}
+        <template v-if="watcher.sourceType"> · {{ watcher.sourceType }}</template>
+      </span>
+      <span v-else-if="!watcher.globalEnabled" class="auto-sync-hint">
+        {{ t('wiki.sources.autoSyncGlobalOffHint') }}
+      </span>
     </div>
 
     <!-- Raw materials list -->
@@ -497,7 +520,49 @@ const textTitle = ref('')
 const textContent = ref('')
 const dirPath = ref(store.currentKB?.sourceDirectory || '')
 const scanning = ref(false)
-const scanResult = ref<{ scanned: number; added: number; skipped: number } | null>(null)
+const scanResult = ref<{ scanned: number; added: number; skipped: number; errors?: string[] } | null>(null)
+
+// ─── Per-KB auto-sync (source watcher) ────────────────────────────────────────
+// Auto-sync periodically scans the directory above. It runs only when the
+// server-global master switch (watcher.globalEnabled, ops-controlled) AND this
+// KB's toggle (watcher.kbEnabled) are both on. When the global switch is off the
+// toggle is disabled with a hint — there's nothing a non-ops user can do here.
+const watcher = reactive({
+  globalEnabled: false,
+  kbEnabled: false,
+  intervalMs: 0,
+  sourceType: null as string | null,
+  busy: false,
+})
+async function loadWatcher(kbId: number) {
+  try {
+    const res: any = await wikiApi.getSourceWatcher(kbId)
+    const d = res?.data ?? res
+    watcher.globalEnabled = !!d.watcherEnabled
+    watcher.kbEnabled = !!d.kbWatcherEnabled
+    watcher.intervalMs = d.intervalMs || 0
+    watcher.sourceType = d.sourceType || null
+  } catch { /* leave defaults; auto-sync UI just shows disabled */ }
+}
+async function toggleWatcher(next: boolean) {
+  if (!store.currentKB) return
+  watcher.busy = true
+  try {
+    await wikiApi.setWatcherEnabled(store.currentKB.id, next)
+    watcher.kbEnabled = next
+    mcToast.success(t('common.saved'))
+  } catch (e: any) {
+    mcToast.error(e?.response?.data?.message || t('wiki.sources.toggleFailed'))
+  } finally {
+    watcher.busy = false
+  }
+}
+watch(() => store.currentKB?.id, (id) => {
+  if (id) {
+    dirPath.value = store.currentKB?.sourceDirectory || ''
+    void loadWatcher(id as number)
+  }
+}, { immediate: true })
 
 // ─── Drag-over state ──────────────────────────────────────────────────────────
 const { isDragging, onDragEnter, onDragLeave, onDrop: handleDrop } = useFileDrop(uploadDroppedFiles)
@@ -680,7 +745,8 @@ async function handleScanDir() {
     const result = await store.scanDirectory(store.currentKB.id)
     scanResult.value = result
   } catch (e: any) {
-    console.error('Scan failed', e)
+    const msg = e?.response?.data?.message || e?.message || t('wiki.scanFailed')
+    mcToast.error(msg)
   } finally {
     scanning.value = false
   }
@@ -703,11 +769,21 @@ async function handleScanDir() {
 
 /* Directory scan */
 .dir-scan-row { display: flex; gap: 10px; align-items: center; }
+
+/* Auto-sync (per-KB source watcher) */
+.auto-sync-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: -4px; }
+.auto-sync-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--mc-text-secondary); cursor: pointer; }
+.auto-sync-toggle.disabled { opacity: 0.55; cursor: not-allowed; }
+.auto-sync-toggle input { cursor: inherit; }
+.auto-sync-meta { font-size: 12px; color: var(--mc-text-tertiary); font-variant-numeric: tabular-nums; }
+.auto-sync-hint { font-size: 12px; color: var(--mc-text-tertiary); }
 .dir-input-wrap { flex: 1; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--mc-border); border-radius: 12px; background: var(--mc-bg-elevated); color: var(--mc-text-tertiary); }
 .dir-input-wrap:focus-within { border-color: var(--mc-primary); box-shadow: 0 0 0 2px rgba(217,119,87,0.1); }
 .dir-input { flex: 1; border: none; background: transparent; font-size: 13px; color: var(--mc-text-primary); outline: none; }
 .dir-input::placeholder { color: var(--mc-text-tertiary); }
 .scan-result { font-size: 12px; color: var(--mc-text-secondary); padding: 8px 10px; background: rgba(90,138,90,0.1); border-radius: 10px; }
+.scan-errors { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.scan-error-item { color: var(--mc-danger); font-size: 11px; }
 
 /* Upload row: zone + add text side by side */
 .upload-row { display: flex; gap: 12px; align-items: stretch; }

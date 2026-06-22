@@ -19,7 +19,7 @@ spring:
   profiles:
     active: dev
 
-  # 数据源（默认 H2，生产切换为 mysql profile）
+  # 数据源（默认 H2，生产切换为 mysql 或 kingbase profile）
   datasource:
     url: jdbc:h2:file:./data/mateclaw;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE
     driver-class-name: org.h2.Driver
@@ -124,6 +124,13 @@ springdoc:
 
 # MateClaw 自定义配置
 mateclaw:
+  server:
+    # Public base URL used to build absolute download links for tool-generated
+    # files (e.g. https://mateclaw.example.com). Leave empty to fall back to the
+    # current request's host, and to a relative path when no request is bound.
+    # Set this when agents deliver download links to channels/clients that cannot
+    # resolve a relative URL (IM messages, copied links, external downloads).
+    public-base-url: ${MATECLAW_PUBLIC_BASE_URL:}
   jwt:
     secret: ${JWT_SECRET:MateClaw-JWT-Secret-Key-2024-Please-Change-In-Production}
     expiration: 86400000
@@ -139,9 +146,22 @@ mateclaw:
       #   an admin can move a noisy one to extension per server.
       # legacy: advertise every bound tool up front (pre-disclosure behavior).
       mode: ${MATECLAW_TOOLS_DISCLOSURE_MODE:progressive}
+  workspace:
+    sandbox:
+      # Global fallback filesystem boundary for file/shell tools. When a
+      # conversation has no per-workspace base path configured, operations are
+      # confined to this root instead of running unconstrained against the whole
+      # filesystem (fail-closed default). Set enabled=false to restore the legacy
+      # unconstrained behaviour for unconfigured conversations.
+      enabled: ${MATECLAW_WORKSPACE_SANDBOX_ENABLED:true}
+      root: ${MATECLAW_WORKSPACE_SANDBOX_ROOT:${user.dir}/data/workspace}
   skill:
     workspace:
-      root: ${user.home}/.mateclaw/skills
+      # Skill workspace root. Override with MATECLAW_SKILL_WORKSPACE_ROOT to
+      # relocate it onto a persistent volume — in Docker this is pointed at
+      # /app/data/skills so the existing server_data volume persists installed
+      # skills, accumulated LESSONS.md, and skill runtime files across restarts.
+      root: ${MATECLAW_SKILL_WORKSPACE_ROOT:${user.home}/.mateclaw/skills}
       auto-init: true
       delete-policy: archive
     disclosure:
@@ -215,6 +235,10 @@ mateclaw:
 # MateClaw Agent 配置
 mate:
   agent:
+    # Deterministic Markdown cleanup of the final answer (heading spaces, glued
+    # ---, table pipe alignment) before persistence / channel delivery. Set to
+    # false to pass model output through verbatim.
+    markdown-normalize-enabled: true
     graph:
       observation:
         # 与 GraphObservationProperties.java 默认值对齐，参考 openclaw token-budget 设计
@@ -300,3 +324,14 @@ mate:
       contradiction-check-enabled: false       # experimental simple detection, enable after LLM batch impl
       trust-half-life-days: 60
       forget-enabled: true
+    # Always-on injection budget — bounds the per-turn size of the user/feedback structured block
+    system-block-max-chars: 4000               # char cap on the always-on block; over budget drops oldest by Updated date (LRU); 0 = unlimited
+    system-block-max-entries-per-type: 40       # max entries injected per type (user/feedback); 0 = unlimited
+    # Structured-memory consolidation — separate maintenance task; LLM merges duplicate/stale user/feedback entries (shared + per-owner) to curb storage growth
+    structured-consolidation-enabled: true            # off = injection cap only, no storage-side merge
+    structured-consolidation-min-entries: 8            # buckets with fewer entries skip the LLM call to save cost
+    structured-consolidation-cron: "0 30 3 * * ?"     # own schedule, decoupled from dreaming-enabled / dreaming-cron
+    structured-consolidation-max-owners-per-run: 50    # cap LLM cost per agent per run; remaining owners picked up next run; 0 = unlimited
+    # Always-on file ceilings — deterministic backstop so PROFILE.md / MEMORY.md (LLM-rewritten) cannot grow per-turn context without bound
+    profile-max-chars: 4000                            # PROFILE.md hard cap; truncates at a section boundary if the rewrite overruns; 0 = unlimited
+    memory-md-max-chars: 8000                          # MEMORY.md hard cap; 0 = unlimited
