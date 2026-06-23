@@ -384,12 +384,16 @@ public class DelegateAgentTool {
 
     @vip.mate.tool.ConcurrencyUnsafe("internally fans out to its own thread pool; outer executor must not double-parallelize")
     @Tool(description = """
-            Delegate multiple tasks to different Agents in parallel (max 3). \
+            Delegate multiple tasks to different Agents in parallel (max 8). \
             Each task runs concurrently in an independent child session. \
             Use this when you have multiple independent sub-tasks that can run simultaneously. \
-            Input is a JSON array: [{"agentName":"Agent名称","task":"任务描述"}, ...]""")
+            Input is a JSON array of objects with required "agentName" and "task", plus optional \
+            "optional" (true = this task's failure must not abort the batch) and "timeout_seconds" \
+            (widen the shared batch budget for a deliberately long task). When a required (non-optional) \
+            task fails, remaining tasks are cancelled early instead of waiting out the full budget. \
+            Example: [{"agentName":"X","task":"Y","optional":false,"timeout_seconds":120}, ...]""")
     public String delegateParallel(
-            @ToolParam(description = "JSON array of tasks: [{\"agentName\":\"X\",\"task\":\"Y\"}, ...]")
+            @ToolParam(description = "JSON array of tasks: [{\"agentName\":\"X\",\"task\":\"Y\",\"optional\":false,\"timeout_seconds\":120}, ...]")
             String tasksJson,
             // RFC-063r §2.5 改动点 5: hidden from LLM, used to inherit ChatOrigin into children.
             @Nullable ToolContext ctx) {
@@ -433,9 +437,11 @@ public class DelegateAgentTool {
 
         // 2. Main thread: validate agents, create child conversations, register relays
         record PreparedChild(int index, AgentEntity agent, String task, String childConvId,
-                             Runnable stopRelay, String subagentId) {}
+                             Runnable stopRelay, String subagentId, boolean optional) {}
         List<PreparedChild> prepared = new ArrayList<>();
         List<String> errors = new ArrayList<>();
+        // Highest per-task timeout override; widens the batch budget below.
+        int maxTaskTimeoutSeconds = 0;
 
         for (int i = 0; i < tasks.size(); i++) {
             Map<String, String> t = tasks.get(i);
@@ -453,6 +459,14 @@ public class DelegateAgentTool {
                 continue;
             }
 
+            // Optional tasks never trigger fail-fast; per-task timeout_seconds
+            // (when present) widens the shared batch budget.
+            boolean optional = "true".equalsIgnoreCase(t.get("optional"));
+            Integer taskTimeout = parsePositiveIntOrNull(t.get("timeout_seconds"));
+            if (taskTimeout != null) {
+                maxTaskTimeoutSeconds = Math.max(maxTaskTimeoutSeconds, taskTimeout);
+            }
+
             String childConvId = createChildConv(agent, parentConversationId);
             String subagentId = parentConversationId != null
                     ? subagentRegistry.register(parentConversationId, childConvId,
@@ -462,7 +476,7 @@ public class DelegateAgentTool {
                     ? registerBatchedRelay(childConvId, rootConvFinal, agent.getName(),
                             subagentId, parentSubagentId, childDepth)
                     : null;
-            prepared.add(new PreparedChild(i, agent, task, childConvId, stopRelay, subagentId));
+            prepared.add(new PreparedChild(i, agent, task, childConvId, stopRelay, subagentId, optional));
         }
 
         if (prepared.isEmpty()) {
@@ -483,6 +497,14 @@ public class DelegateAgentTool {
                     "parallel", true,
                     "children", childrenInfo));
         }
+
+        // Batch budget: the global default, widened by the largest per-task
+        // timeout_seconds override so a deliberately long child isn't cut off.
+        final int effectiveTimeoutSeconds = Math.max(parallelTimeoutSeconds, maxTaskTimeoutSeconds);
+        // Completes as soon as any REQUIRED child finishes unsuccessfully, so the
+        // wait below can collapse early (fail-fast) instead of burning the full
+        // budget while the parent already knows the batch can't succeed.
+        CompletableFuture<Void> requiredFailure = new CompletableFuture<>();
 
         // 4. Fan out — execute children in parallel
         long startTime = System.currentTimeMillis();
@@ -528,19 +550,31 @@ public class DelegateAgentTool {
                 });
             }
 
+            // Required children arm the fail-fast signal on unsuccessful completion.
+            if (!p.optional()) {
+                future.thenAccept(r -> {
+                    if (r != null && !r.success) {
+                        requiredFailure.complete(null);
+                    }
+                });
+            }
+
             futures.put(p.index, future);
         }
 
-        // 5. Wait for all children (with timeout)
+        // 5. Wait for all children, or bail out early when a required child fails.
         List<ChildResult> results = new ArrayList<>();
         try {
-            CompletableFuture.allOf(futures.values().toArray(new CompletableFuture[0]))
-                    .get(parallelTimeoutSeconds, TimeUnit.SECONDS);
+            CompletableFuture<Void> allDone = CompletableFuture.allOf(
+                    futures.values().toArray(new CompletableFuture[0]));
+            CompletableFuture.anyOf(allDone, requiredFailure)
+                    .get(effectiveTimeoutSeconds, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            log.warn("Parallel delegation timed out ({}s), collecting completed results", parallelTimeoutSeconds);
+            log.warn("Parallel delegation timed out ({}s), collecting completed results", effectiveTimeoutSeconds);
         } catch (Exception e) {
             log.error("Parallel delegation error: {}", e.getMessage());
         }
+        boolean failFast = requiredFailure.isDone();
 
         // Collect results — completed futures get their value; unfinished ones are cancelled and recorded as timeout
         for (var entry : futures.entrySet()) {
@@ -565,8 +599,11 @@ public class DelegateAgentTool {
                     streamTracker.requestStop(p.childConvId);
                 }
                 f.cancel(true);
-                // Use ofTimeout so outcome="timeout" is explicit and distinct from "error".
-                results.add(ChildResult.ofTimeout(idx, agentName, parallelTimeoutSeconds));
+                // Distinguish fail-fast cancellation from a genuine timeout so the
+                // parent doesn't misread a cancelled sibling as a slow agent.
+                results.add(failFast
+                        ? ChildResult.ofCancelled(idx, agentName)
+                        : ChildResult.ofTimeout(idx, agentName, effectiveTimeoutSeconds));
             }
         }
 
@@ -627,6 +664,7 @@ public class DelegateAgentTool {
         long successCount = results.stream().filter(r -> r.success && !r.isBlank()).count();
         long blankCount = results.stream().filter(ChildResult::isBlank).count();
         long timeoutCount = results.stream().filter(r -> "timeout".equals(r.outcome)).count();
+        long cancelledCount = results.stream().filter(r -> "cancelled".equals(r.outcome)).count();
         long errorCount = results.stream().filter(r -> "error".equals(r.outcome)).count();
 
         StringBuilder sb = new StringBuilder();
@@ -639,6 +677,7 @@ public class DelegateAgentTool {
           .append(" success=").append(successCount)
           .append(" blank_success=").append(blankCount)
           .append(" timeout=").append(timeoutCount)
+          .append(" cancelled=").append(cancelledCount)
           .append(" error=").append(errorCount)
           .append(" durationMs=").append(totalDurationMs)
           .append("\n\n");
@@ -673,7 +712,7 @@ public class DelegateAgentTool {
                       .append("，trim 后 0 字符）。请勿将此误报为超时或失败——子 Agent 已正常完成，只是本次无输出。\n");
                 }
                 case "timeout" ->
-                    sb.append("❌ 超时（").append(parallelTimeoutSeconds).append("s 内未返回）\n");
+                    sb.append("❌ 超时（").append(effectiveTimeoutSeconds).append("s 内未返回）\n");
                 default ->
                     sb.append("❌ 失败：").append(r.error).append("\n");
             }
@@ -1084,6 +1123,16 @@ public class DelegateAgentTool {
                     "timeout", 0, 0);
         }
 
+        /**
+         * Factory for a child cancelled by fail-fast — a required sibling failed,
+         * so this still-running child was stopped before finishing. Distinct from
+         * a timeout (it was not slow; the batch was abandoned).
+         */
+        static ChildResult ofCancelled(int idx, String name) {
+            return new ChildResult(idx, name, false, null,
+                    "已取消（必需子任务失败，触发提前收束）", 0, "cancelled", 0, 0);
+        }
+
         // Legacy shims — kept for callers that pre-date the factory methods
         static ChildResult success(int idx, String name, String result, long ms) {
             // result may already be truncated at call site — lengths will be approximate
@@ -1334,6 +1383,17 @@ public class DelegateAgentTool {
             if (ctxConvId != null && !ctxConvId.isBlank()) return ctxConvId;
         } catch (Exception ignored) {}
         return DelegationContext.parentConversationId();
+    }
+
+    /** Parse a positive integer (seconds) or return null for blank / invalid / non-positive input. */
+    private static Integer parsePositiveIntOrNull(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            return v > 0 ? v : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private String availableAgentsHint() {
