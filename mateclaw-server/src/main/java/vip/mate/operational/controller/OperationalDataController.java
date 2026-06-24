@@ -5,10 +5,10 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.operational.model.ExportTask;
 import vip.mate.operational.service.OperationalDataExportService;
+import vip.mate.workspace.core.annotation.RequireGlobalAdmin;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -32,7 +32,7 @@ public class OperationalDataController {
     }
 
     @PostMapping("/generate")
-    @PreAuthorize("hasRole('ADMIN')")
+    @RequireGlobalAdmin
     public ResponseEntity<Map<String, Object>> generate(
             @RequestParam LocalDate startDate,
             @RequestParam LocalDate endDate) {
@@ -54,7 +54,7 @@ public class OperationalDataController {
      * 查询生成进度（驱动圆形进度条）
      */
     @GetMapping("/progress")
-    @PreAuthorize("hasRole('ADMIN')")
+    @RequireGlobalAdmin
     public ResponseEntity<Map<String, Object>> progress(@RequestParam String taskId) {
         ExportTask task = exportService.getProgress(taskId);
         if (task == null) {
@@ -81,7 +81,7 @@ public class OperationalDataController {
      * 下载已生成的文件（一次有效，需 downloadToken）
      */
     @GetMapping("/download")
-    @PreAuthorize("hasRole('ADMIN')")
+    @RequireGlobalAdmin
     public ResponseEntity<Resource> download(
             @RequestParam String taskId,
             @RequestParam String token) {
@@ -97,7 +97,7 @@ public class OperationalDataController {
                 return ResponseEntity.status(HttpStatus.GONE).build();
             }
 
-            task.setDownloaded(true);
+            // The one-time token was already atomically claimed in confirmDownload().
             InputStreamResource resource = new InputStreamResource(Files.newInputStream(task.getFilePath()));
 
             String encodedName = new String(task.getFileName().getBytes("UTF-8"), "ISO-8859-1");

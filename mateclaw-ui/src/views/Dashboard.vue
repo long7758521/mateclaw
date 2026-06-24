@@ -232,7 +232,6 @@
           v-if="exportStatus === 'idle' || exportStatus === 'failed'"
           type="primary"
           :disabled="!exportDateRange"
-          :loading="exportStatus === 'generating'"
           @click="doGenerate"
         >
           {{ exportStatus === 'failed' ? t('dashboard.regenerating') : t('dashboard.generateReport') }}

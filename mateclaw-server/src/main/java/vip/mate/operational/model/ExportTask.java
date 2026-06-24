@@ -2,6 +2,7 @@ package vip.mate.operational.model;
 
 import java.nio.file.Path;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 运营数据导出任务——异步生成 + 一次下载模型。
@@ -14,7 +15,7 @@ public class ExportTask {
     private volatile Path filePath;
     private volatile long completedAt;
     private volatile String downloadToken;
-    private volatile boolean downloaded;
+    private final AtomicBoolean downloaded = new AtomicBoolean(false);
     private volatile String errorMessage;
 
     public ExportTask() {
@@ -62,8 +63,9 @@ public class ExportTask {
     public String getDownloadToken() { return downloadToken; }
     public void setDownloadToken(String downloadToken) { this.downloadToken = downloadToken; }
 
-    public boolean isDownloaded() { return downloaded; }
-    public void setDownloaded(boolean downloaded) { this.downloaded = downloaded; }
+    public boolean isDownloaded() { return downloaded.get(); }
+    /** Atomically claim the one-time download; returns false if already claimed. */
+    public boolean claimDownload() { return downloaded.compareAndSet(false, true); }
 
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }

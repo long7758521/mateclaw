@@ -70,10 +70,11 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /**
- * 运营数据导出服务——异步生成 9 Sheet Excel，一次下载。
+ * Operational data export service: asynchronously builds a 9-sheet Excel report
+ * and serves it through a one-time download.
  * <p>
- * 设计原则（来自 design/operational-data-export.md）：
- * SQL/Service → API → 自算。优先复现有 Service，其次 Mapper 直查，内存聚合。
+ * Data-sourcing strategy: prefer reusing existing service methods, fall back to
+ * direct mapper queries, then aggregate in memory.
  */
 @Service
 public class OperationalDataExportService {
@@ -206,8 +207,15 @@ public class OperationalDataExportService {
             throw new IllegalStateException("正在生成中，请等待");
         }
         ExportTask task = new ExportTask();
-        tasks.put(task.getTaskId(), task);
-        CompletableFuture.runAsync(() -> runExport(task, from, to, true));
+        try {
+            tasks.put(task.getTaskId(), task);
+            CompletableFuture.runAsync(() -> runExport(task, from, to, true));
+        } catch (RuntimeException e) {
+            // Async submission failed, so runExport's finally will never release
+            // the lock — release it here to avoid wedging the flag permanently.
+            generating.set(false);
+            throw e;
+        }
         return task;
     }
 
@@ -232,8 +240,10 @@ public class OperationalDataExportService {
         ExportTask task = tasks.get(taskId);
         if (task == null) return null;
         if (!token.equals(task.getDownloadToken())) return null;
-        if (task.isDownloaded()) return null;
         if (!"completed".equals(task.getStatus())) return null;
+        // Atomically claim the one-time download so concurrent requests cannot
+        // both succeed; a second caller gets null (treated as 410 Gone).
+        if (!task.claimDownload()) return null;
         return task;
     }
 
@@ -579,7 +589,7 @@ public class OperationalDataExportService {
             long[] acc = usageByName.computeIfAbsent(u.getSkillName(), k -> new long[]{0, 0});
             acc[0] += u.getLoadCount() != null ? u.getLoadCount() : 0;
             acc[1] = Math.max(acc[1], u.getLastLoadedAt() != null
-                ? u.getLastLoadedAt().toEpochSecond(java.time.ZoneOffset.UTC) : 0);
+                ? u.getLastLoadedAt().toEpochSecond(ZoneOffset.UTC) : 0);
         }
 
         // agent bindings
@@ -614,7 +624,7 @@ public class OperationalDataExportService {
             createCell(row, 7, s.getDescription(), null);
             long[] usage = usageByName.get(s.getName());
             if (usage != null && usage[1] > 0) {
-                createCell(row, 8, java.time.LocalDateTime.ofEpochSecond(usage[1], 0, java.time.ZoneOffset.UTC), dateStyle);
+                createCell(row, 8, LocalDateTime.ofEpochSecond(usage[1], 0, ZoneOffset.UTC), dateStyle);
                 createCell(row, 9, usage[0], numStyle);
             } else {
                 createCell(row, 8, "", null);
@@ -658,7 +668,7 @@ public class OperationalDataExportService {
             String key = (c.getWorkspaceId() != null ? c.getWorkspaceId() : 0) + "|" + (c.getUsername() != null ? c.getUsername() : "-");
             userConvIds.computeIfAbsent(key, k -> new HashSet<>()).add(c.getConversationId());
             if (c.getCreateTime() != null && c.getLastActiveTime() != null) {
-                userDuration.merge(key, (long) java.time.Duration.between(c.getCreateTime(), c.getLastActiveTime()).getSeconds(), Long::sum);
+                userDuration.merge(key, (long) Duration.between(c.getCreateTime(), c.getLastActiveTime()).getSeconds(), Long::sum);
             }
             if (c.getLastActiveTime() != null) {
                 userLastActive.merge(key, c.getLastActiveTime(), (a, b) -> a.isAfter(b) ? a : b);
@@ -798,7 +808,7 @@ public class OperationalDataExportService {
                     (long)(next.getCompletionTokens() != null ? next.getCompletionTokens() : 0), numStyle);
                 createCell(row, 10, next.getRuntimeModel(), null);
                 createCell(row, 11, next.getRuntimeProvider(), null);
-                createCell(row, 12, java.time.Duration.between(m.getCreateTime(), next.getCreateTime()).toMillis() / 1000.0, numStyle);
+                createCell(row, 12, Duration.between(m.getCreateTime(), next.getCreateTime()).toMillis() / 1000.0, numStyle);
             }
         }
         for (int i = 0; i < cols.length; i++) sheet.autoSizeColumn(i);
@@ -1129,7 +1139,7 @@ public class OperationalDataExportService {
             createCell(row, 2, run.getTriggerType(), null);
             createCell(row, 3, run.getStatus(), null);
             if (run.getStartedAt() != null && run.getFinishedAt() != null) {
-                createCell(row, 4, java.time.Duration.between(run.getStartedAt(), run.getFinishedAt()).toMillis() / 1000.0, null);
+                createCell(row, 4, Duration.between(run.getStartedAt(), run.getFinishedAt()).toMillis() / 1000.0, null);
             } else {
                 createCell(row, 4, "", null);
             }
@@ -1268,7 +1278,14 @@ public class OperationalDataExportService {
         } else if (value instanceof String s) {
             cell.setCellValue(s);
         } else if (value instanceof Long l) {
-            cell.setCellValue((double) l);
+            // Snowflake IDs exceed the 2^53-1 exact-integer range of Excel's
+            // numeric (double) cells and would be rounded or shown in scientific
+            // notation; write out-of-range longs as text to preserve precision.
+            if (l > 9007199254740991L || l < -9007199254740991L) {
+                cell.setCellValue(String.valueOf(l));
+            } else {
+                cell.setCellValue((double) l);
+            }
         } else if (value instanceof Integer i) {
             cell.setCellValue((double) i);
         } else if (value instanceof Double d) {
