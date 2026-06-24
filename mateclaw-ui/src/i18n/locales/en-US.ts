@@ -97,6 +97,16 @@ export default {
     subagentAsync: 'Running in background — result via task_output',
     executionPlan: 'Execution Plan',
     planDone: 'done',
+    runOverview: {
+      title: 'Run Overview',
+      plan: 'Plan Progress',
+      subagents: 'Sub-agents',
+      noPlan: 'No execution plan yet',
+      noSubagents: 'No sub-agents yet',
+      collapse: 'Collapse',
+      expand: 'Expand',
+      running: 'running',
+    },
     detail: {
       viewDetail: 'View details',
       request: 'Request',

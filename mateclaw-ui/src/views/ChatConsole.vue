@@ -243,6 +243,12 @@
       />
     </div>
 
+        <!-- 运行总览侧栏：计划进度 + 子 Agent 实时状态 -->
+        <RunOverviewPanel
+          :messages="messages"
+          :is-generating="isGenerating"
+        />
+
         <!-- Talk Mode 覆盖层 -->
         <TalkMode
           v-if="showTalkMode"
@@ -268,6 +274,7 @@ import { copyToClipboard } from '@/utils/clipboard'
 import { useFileDrop } from '@/composables/useFileDrop'
 import { useIsMobile, useMediaQuery, BREAKPOINTS } from '@/composables/useBreakpoint'
 import { useChat } from '@/composables/chat/useChat'
+import RunOverviewPanel from '@/components/chat/RunOverviewPanel.vue'
 import { reconstructErrorInfo } from '@/types/chatError'
 import { reconcileMessages, extractMessages } from '@/utils/messageReconcile'
 import type { Conversation, Agent, ModelConfig, ProviderInfo, ActiveModelsInfo, ChatAttachment, MessageContentPart, Message, ToolCallMeta, StreamPhase } from '@/types'

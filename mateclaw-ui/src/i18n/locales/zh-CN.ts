@@ -97,6 +97,16 @@ export default {
     subagentAsync: '后台运行中，结果稍后获取',
     executionPlan: '执行计划',
     planDone: '已完成',
+    runOverview: {
+      title: '运行总览',
+      plan: '计划进度',
+      subagents: '子 Agent',
+      noPlan: '暂无执行计划',
+      noSubagents: '暂无子 Agent',
+      collapse: '收起总览',
+      expand: '展开总览',
+      running: '运行中',
+    },
     detail: {
       viewDetail: '查看详情',
       request: '请求参数',
