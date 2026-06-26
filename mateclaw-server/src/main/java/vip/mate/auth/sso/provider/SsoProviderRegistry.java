@@ -1,5 +1,6 @@
 package vip.mate.auth.sso.provider;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -15,6 +16,7 @@ import java.util.Optional;
  * @author MateClaw Team
  */
 @Component
+@ConditionalOnProperty(name = "mateclaw.sso.enabled", havingValue = "true")
 public class SsoProviderRegistry {
 
     private final Map<String, SsoProvider> providers = new LinkedHashMap<>();

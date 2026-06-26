@@ -4,6 +4,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.*;
 import vip.mate.auth.model.LoginResponse;
 import vip.mate.auth.sso.provider.SsoProviderRegistry;
@@ -22,6 +23,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @RestController
 @RequestMapping("/api/v1/auth/sso")
+@ConditionalOnProperty(name = "mateclaw.sso.enabled", havingValue = "true")
 @RequiredArgsConstructor
 public class SsoController {
 
