@@ -418,7 +418,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   }
 
   /** Markdown link pointing at a generated-file download URL. */
-  const GENERATED_FILE_LINK_RE = /\[([^\]]+)\]\(([^)]*?\/api\/v1\/files\/generated\/[a-zA-Z0-9-]+)\)/g
+  const GENERATED_FILE_LINK_RE = /\[([^\]]+)\]\(((?:https?:\/\/[^/\s)\]]+)?\/api\/v1\/files\/generated\/[A-Za-z0-9-]+)\)/g
 
   /** Extract generated-file artifacts from a tool result string. */
   function extractGeneratedFiles(result: unknown, toolName: string): GeneratedFile[] {

@@ -37,6 +37,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1733,8 +1735,8 @@ public class ChatController {
 
     /** Markdown link pointing at a generated-file download URL. Used by the
      *  StreamAccumulator to surface generated artifacts in the run-overview rail. */
-    private static final java.util.regex.Pattern GENERATED_FILE_LINK_PATTERN =
-            java.util.regex.Pattern.compile("\\[([^\\]]+)\\]\\(([^)]*?/api/v1/files/generated/[a-zA-Z0-9-]+)\\)");
+    private static final Pattern GENERATED_FILE_LINK_PATTERN =
+            Pattern.compile("\\[([^\\]]+)\\]\\(((?:https?://[^/\\s)\\]]+)?/api/v1/files/generated/[A-Za-z0-9-]+)\\)");
 
     /**
      * 流式累积器 — 收集 StreamDelta 事件，持久化到 DB。
@@ -2044,7 +2046,7 @@ public class ChatController {
          *  produce duplicate entries in the run-overview rail. */
         private void extractGeneratedFiles(String result, String toolName) {
             if (result == null || result.isBlank()) return;
-            java.util.regex.Matcher m = GENERATED_FILE_LINK_PATTERN.matcher(result);
+            Matcher m = GENERATED_FILE_LINK_PATTERN.matcher(result);
             while (m.find()) {
                 String url = m.group(2);
                 boolean dup = generatedFiles.stream()

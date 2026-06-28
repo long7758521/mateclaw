@@ -106,7 +106,6 @@ export default {
       plan: 'Plan Progress',
       subagents: 'Sub-agents',
       files: 'Generated Files',
-      noFiles: 'No generated files yet',
       noPlan: 'No execution plan yet',
       noSubagents: 'No sub-agents yet',
       collapse: 'Collapse',
