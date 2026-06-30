@@ -809,6 +809,7 @@ export default {
       discovery: {
         discover: '发现模型',
         discovering: '正在发现...',
+        configureFirst: '请先在「配置」里填入 API Key，再发现该供应商的全部模型',
         testConnection: '测试连接',
         testing: '测试中...',
         testModel: '测试',
