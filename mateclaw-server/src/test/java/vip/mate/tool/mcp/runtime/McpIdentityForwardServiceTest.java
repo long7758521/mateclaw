@@ -11,6 +11,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.util.Base64;
 import java.util.Date;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -93,7 +94,7 @@ class McpIdentityForwardServiceTest {
     void audienceResolution() {
         var p = new McpIdentityForwardProperties();
         assertThat(p.audienceFor(42L, "svc")).isEqualTo("svc");          // default = name
-        p.getToken().setAudiences(java.util.Map.of("svc", "https://api.internal"));
+        p.getToken().setAudiences(Map.of("svc", "https://api.internal"));
         assertThat(p.audienceFor(42L, "svc")).isEqualTo("https://api.internal");
     }
 }

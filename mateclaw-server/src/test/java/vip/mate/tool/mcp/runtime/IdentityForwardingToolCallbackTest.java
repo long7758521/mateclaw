@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -61,10 +63,10 @@ class IdentityForwardingToolCallbackTest {
     void optInMatching() {
         McpIdentityForwardProperties p = new McpIdentityForwardProperties();
         assertThat(p.forwardsTo(42L, "svc")).isFalse();           // empty set
-        p.setServers(java.util.Set.of("svc"));
+        p.setServers(Set.of("svc"));
         assertThat(p.forwardsTo(42L, "svc")).isTrue();            // by name
         assertThat(p.forwardsTo(42L, "other")).isFalse();
-        p.setServers(java.util.Set.of("42"));
+        p.setServers(Set.of("42"));
         assertThat(p.forwardsTo(42L, "other")).isTrue();          // by id
     }
 }
