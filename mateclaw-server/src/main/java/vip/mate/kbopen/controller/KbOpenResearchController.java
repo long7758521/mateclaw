@@ -36,11 +36,11 @@ import java.util.concurrent.Executors;
  * pipeline) with SSE progress. The start endpoint returns a sessionId; the
  * caller subscribes to SSE for progress, or polls status for the final result.
  *
- * <p>R7: the SSE endpoint uses {@code ?token=} query param because browser
+ * <p>The SSE endpoint uses a {@code ?token=} query param because browser
  * EventSource cannot set Authorization headers. The {@code KbOpenApiAuthFilter}
  * already falls back to query param tokens.
  *
- * <h3>Cost &amp; lifecycle controls (review #446)</h3>
+ * <h3>Cost &amp; lifecycle controls</h3>
  * <ul>
  *   <li>Cancel is <b>cooperative</b>: it calls {@link ChatStreamTracker#requestStop}
  *       so {@link WikiResearchService} bails at the next stage boundary — the
@@ -128,7 +128,7 @@ public class KbOpenResearchController {
             @PathVariable Long kbId,
             @PathVariable String sessionId,
             HttpServletRequest request) {
-        requireSessionOwnership(request, sessionId);
+        requireSessionOwnership(request, kbId, sessionId);
 
         SseEmitter emitter = new Utf8SseEmitter(10 * 60 * 1000L);
         boolean attached = streamTracker.attach(sessionId, emitter);
@@ -154,7 +154,7 @@ public class KbOpenResearchController {
             @PathVariable Long kbId,
             @PathVariable String sessionId,
             HttpServletRequest request) {
-        Session session = requireSessionOwnership(request, sessionId);
+        Session session = requireSessionOwnership(request, kbId, sessionId);
         Status status = session.status();
         ResearchResult result = session.result();
 
@@ -181,7 +181,7 @@ public class KbOpenResearchController {
             @PathVariable Long kbId,
             @PathVariable String sessionId,
             HttpServletRequest request) {
-        Session session = requireSessionOwnership(request, sessionId);
+        Session session = requireSessionOwnership(request, kbId, sessionId);
         if (session.status() != Status.RUNNING) {
             throw new MateClawException(409, "Session is not running (status: " + session.status() + ")");
         }
@@ -209,7 +209,7 @@ public class KbOpenResearchController {
         return ctx;
     }
 
-    private Session requireSessionOwnership(HttpServletRequest request, String sessionId) {
+    private Session requireSessionOwnership(HttpServletRequest request, Long kbId, String sessionId) {
         KbApiKeyContext ctx = requireContext(request);
         Optional<Session> session = sessionRegistry.get(sessionId);
         if (session.isEmpty()) {
@@ -218,6 +218,12 @@ public class KbOpenResearchController {
         // A caller can only access sessions they started
         if (!session.get().keyId().equals(ctx.keyId())) {
             throw new MateClawException(403, "Session does not belong to this API key");
+        }
+        // The session must also belong to the KB named in the path, so a session
+        // started under one KB cannot be addressed via another — even when the
+        // caller's key happens to be bound to both.
+        if (!session.get().kbId().equals(kbId)) {
+            throw new MateClawException(404, "Research session not found: " + sessionId);
         }
         return session.get();
     }

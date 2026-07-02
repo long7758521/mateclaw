@@ -9,8 +9,11 @@ import vip.mate.wiki.service.WikiResearchService.ResearchResult;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -187,10 +190,10 @@ class KbResearchSessionRegistryTest {
         int cap = 3;
         KbResearchSessionRegistry registry = new KbResearchSessionRegistry(cap, Duration.ofMinutes(30));
         int threads = cap * 4; // far more contenders than slots
-        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-        java.util.concurrent.atomic.AtomicInteger admitted = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicInteger rejected = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.List<Thread> workers = new java.util.ArrayList<>();
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger admitted = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
+        List<Thread> workers = new ArrayList<>();
 
         for (int i = 0; i < threads; i++) {
             String sid = "concurrent-" + i;
