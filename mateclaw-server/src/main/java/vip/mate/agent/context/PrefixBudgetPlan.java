@@ -19,7 +19,8 @@ public record PrefixBudgetPlan(
         int wikiTokens,
         int skillCatalogTokens,
         int extensionCatalogTokens,
-        int ledgerTokens) {
+        int ledgerTokens,
+        int toolSchemaBudgetTokens) {
 
     /** Window-size tier. Small windows tighten the injection ratio. */
     public enum Profile {
@@ -35,6 +36,6 @@ public record PrefixBudgetPlan(
     public static PrefixBudgetPlan unlimited(int effectiveMaxTokens) {
         return new PrefixBudgetPlan(false, effectiveMaxTokens, Profile.NORMAL,
                 Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE,
-                Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
+                Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE);
     }
 }

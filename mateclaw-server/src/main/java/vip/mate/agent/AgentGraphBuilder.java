@@ -52,6 +52,7 @@ import vip.mate.skill.runtime.SkillCatalogRenderer;
 import vip.mate.skill.service.SkillService;
 import vip.mate.system.service.SystemSettingService;
 import vip.mate.tool.ToolRegistry;
+import vip.mate.tool.disclosure.ToolUsageRecencyTracker;
 import vip.mate.memory.spi.MemoryManager;
 import vip.mate.workspace.document.WorkspaceFileService;
 import vip.mate.tool.guard.service.ToolGuardService;
@@ -103,6 +104,7 @@ public class AgentGraphBuilder {
     private final ModelProviderService modelProviderService;
     private final ModelContextWindowResolver contextWindowResolver;
     private final PrefixBudgetPlanner prefixBudgetPlanner;
+    private final ToolUsageRecencyTracker toolUsageRecencyTracker;
     private final vip.mate.llm.service.ModelCapabilityService modelCapabilityService;
     private final ProviderRouter providerRouter;
     private final PlanningService planningService;
@@ -428,10 +430,17 @@ public class AgentGraphBuilder {
         // in ReasoningNode; Plan-Execute keeps advertising every tool (it has no
         // action node to record enable_tool), so baking the catalog there would
         // describe an enable_tool flow that can never take effect.
+        // Auto-demotion is likewise ReAct-only: hiding a tool from Plan-Execute
+        // would remove it with no enable_tool path to recover it.
         boolean isPlanExecute = "plan_execute".equals(entity.getAgentType());
+        Set<String> autoDemotedTools = Set.of();
         if (!isPlanExecute) {
+            if (prefixBudgetPlan.enabled()) {
+                autoDemotedTools = toolDisclosureService.computeAutoDemotions(
+                        toolSet, prefixBudgetPlan.toolSchemaBudgetTokens());
+            }
             String extensionCatalog = toolDisclosureService.renderExtensionCatalog(
-                    toolSet, effectiveMaxInputTokens);
+                    toolSet, effectiveMaxInputTokens, autoDemotedTools);
             if (extensionCatalog != null && !extensionCatalog.isBlank()) {
                 enhancedPrompt = enhancedPrompt + extensionCatalog;
             }
@@ -452,7 +461,7 @@ public class AgentGraphBuilder {
                     entity.getName(), maxIter, toolSet.size(), protocol.getId());
         } else {
             agent = buildReActAgent(toolSet, runtimeModel, maxIter, entity.getId(), skillCatalogRenderer,
-                    prefixBudgetPlan);
+                    prefixBudgetPlan, autoDemotedTools);
             // StateGraph 路径下工具调用由 ActionNode 控制，始终启用
             toolCallingEnabled = true;
             log.info("Built StateGraph ReAct agent: {} (maxIterations={}, tools={}, protocol={})",
@@ -539,17 +548,17 @@ public class AgentGraphBuilder {
 
     StateGraphReActAgent buildReActAgent(AgentToolSet toolSet, ModelConfigEntity runtimeModel,
                                          int maxIter, Long agentId, SkillCatalogRenderer skillCatalogRenderer) {
-        return buildReActAgent(toolSet, runtimeModel, maxIter, agentId, skillCatalogRenderer, null);
+        return buildReActAgent(toolSet, runtimeModel, maxIter, agentId, skillCatalogRenderer, null, Set.of());
     }
 
     StateGraphReActAgent buildReActAgent(AgentToolSet toolSet, ModelConfigEntity runtimeModel,
                                          int maxIter, Long agentId, SkillCatalogRenderer skillCatalogRenderer,
-                                         PrefixBudgetPlan prefixBudgetPlan) {
+                                         PrefixBudgetPlan prefixBudgetPlan, Set<String> autoDemotedTools) {
         ChatModel chatModel = buildRuntimeChatModel(runtimeModel);
         ChatClient chatClient = ChatClient.create(chatModel);
         String reasoningEffort = resolveReasoningEffortForModel(runtimeModel);
         CompiledGraph compiledGraph = buildReActGraph(toolSet, chatModel, maxIter, reasoningEffort,
-                runtimeModel, agentId, skillCatalogRenderer, prefixBudgetPlan);
+                runtimeModel, agentId, skillCatalogRenderer, prefixBudgetPlan, autoDemotedTools);
         return new StateGraphReActAgent(chatClient, conversationService, compiledGraph,
                 chatModel, conversationWindowManager, toolSet);
     }
@@ -616,6 +625,7 @@ public class AgentGraphBuilder {
             // LLM mis-calls a skill name as a tool, the response tells it
             // the right invocation pattern instead of a dead-end error.
             executor.setSkillRuntimeService(skillRuntimeService);
+            executor.setUsageRecencyTracker(toolUsageRecencyTracker);
             // Optional: route child-agent denied-tool audit events through
             // the audit pipeline. Null when audit is not wired (legacy / test).
             if (auditEventService != null) {
@@ -876,13 +886,13 @@ public class AgentGraphBuilder {
                                    String reasoningEffort, ModelConfigEntity primaryModelConfig,
                                    Long agentId, SkillCatalogRenderer skillCatalogRenderer) {
         return buildReActGraph(toolSet, chatModel, maxIterations, reasoningEffort,
-                primaryModelConfig, agentId, skillCatalogRenderer, null);
+                primaryModelConfig, agentId, skillCatalogRenderer, null, Set.of());
     }
 
     CompiledGraph buildReActGraph(AgentToolSet toolSet, ChatModel chatModel, int maxIterations,
                                    String reasoningEffort, ModelConfigEntity primaryModelConfig,
                                    Long agentId, SkillCatalogRenderer skillCatalogRenderer,
-                                   PrefixBudgetPlan prefixBudgetPlan) {
+                                   PrefixBudgetPlan prefixBudgetPlan, Set<String> autoDemotedTools) {
         try {
             List<vip.mate.llm.failover.FallbackEntry> fallbackChain = buildFallbackChain(primaryModelConfig, agentId);
             NodeStreamingChatHelper streamingHelper = new NodeStreamingChatHelper(
@@ -905,6 +915,7 @@ public class AgentGraphBuilder {
             // LLM mis-calls a skill name as a tool, the response tells it
             // the right invocation pattern instead of a dead-end error.
             executor.setSkillRuntimeService(skillRuntimeService);
+            executor.setUsageRecencyTracker(toolUsageRecencyTracker);
             // Optional: route child-agent denied-tool audit events through
             // the audit pipeline. Null when audit is not wired (legacy / test).
             if (auditEventService != null) {
@@ -920,6 +931,7 @@ public class AgentGraphBuilder {
                     streamingHelper, conversationWindowManager, streamTracker, 0, wikiContextService,
                     skillCatalogRenderer, toolDisclosureService, progressLedgerService);
             reasoningNode.setPrefixBudgetPlan(prefixBudgetPlan);
+            reasoningNode.setAutoDemotedTools(autoDemotedTools);
             ActionNode actionNode = new ActionNode(executor, streamTracker);
             ObservationProcessor observationProcessor = new ObservationProcessor(graphObservationProperties);
             ObservationNode observationNode = new ObservationNode(observationProcessor, streamTracker);

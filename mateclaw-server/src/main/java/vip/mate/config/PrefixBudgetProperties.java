@@ -47,6 +47,14 @@ public class PrefixBudgetProperties {
      */
     private double compactTriggerRatioOverride = 0.85;
 
+    /**
+     * Fraction of the effective window the advertised tool schemas may
+     * occupy. When the core tool set estimates above this, the least
+     * recently used demotable tools are auto-moved to the extension catalog
+     * (recoverable via {@code enable_tool}) until the set fits.
+     */
+    private double toolSchemaRatio = 0.25;
+
     /** Relative shares of the injection budget. Normalized at plan time. */
     private Shares shares = new Shares();
 

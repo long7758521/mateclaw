@@ -363,6 +363,19 @@ public class ReasoningNode implements NodeAction {
         this.prefixBudgetPlan = prefixBudgetPlan;
     }
 
+    /**
+     * Core-tier tools auto-demoted to the extension catalog because the
+     * advertised schemas exceeded the window's tool-schema budget. Decided
+     * once at agent-build time (kept stable for prompt caching); the baked
+     * extension catalog lists them so {@code enable_tool} can surface any of
+     * them back.
+     */
+    private Set<String> autoDemotedTools = Set.of();
+
+    public void setAutoDemotedTools(Set<String> autoDemotedTools) {
+        this.autoDemotedTools = autoDemotedTools == null ? Set.of() : autoDemotedTools;
+    }
+
     public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
                          NodeStreamingChatHelper streamingHelper,
                          ConversationWindowManager conversationWindowManager,
@@ -728,7 +741,8 @@ public class ReasoningNode implements NodeAction {
         // so an enable_tool call earlier in this loop takes effect immediately.
         // Falls back to the full tool set when no disclosure service is wired.
         List<ToolCallback> activeCallbacks = (toolDisclosureService != null && toolSet != null)
-                ? toolDisclosureService.split(toolSet, accessor.enabledExtensionTools()).activeCallbacks()
+                ? toolDisclosureService.split(toolSet, accessor.enabledExtensionTools(), autoDemotedTools)
+                        .activeCallbacks()
                 : toolCallbacks;
 
         ChatOptions options = buildChatOptions(effectiveReasoning, activeCallbacks);
