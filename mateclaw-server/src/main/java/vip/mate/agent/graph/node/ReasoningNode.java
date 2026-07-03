@@ -22,6 +22,7 @@ import vip.mate.llm.chatmodel.ThinkingLevelHolder;
 import vip.mate.agent.graph.NodeStreamingChatHelper;
 import vip.mate.agent.context.ConversationWindowManager;
 import vip.mate.agent.context.LoopBudgetConfig;
+import vip.mate.agent.context.PrefixBudgetPlan;
 import vip.mate.agent.context.LoopMessageBudgeter;
 import vip.mate.agent.context.RuntimeContextInjector;
 import vip.mate.agent.context.TokenEstimator;
@@ -350,6 +351,18 @@ public class ReasoningNode implements NodeAction {
      */
     private final vip.mate.agent.progress.ProgressLedgerService progressLedgerService;
 
+    /**
+     * Token budget for the optional prefix injection blocks, computed at
+     * agent-build time against the model's effective context window. Null
+     * when the graph was assembled without budgeting (tests, legacy paths) —
+     * all injection sites then keep their previous absolute-cap behavior.
+     */
+    private PrefixBudgetPlan prefixBudgetPlan;
+
+    public void setPrefixBudgetPlan(PrefixBudgetPlan prefixBudgetPlan) {
+        this.prefixBudgetPlan = prefixBudgetPlan;
+    }
+
     public ReasoningNode(ChatModel chatModel, AgentToolSet toolSet, String reasoningEffort,
                          NodeStreamingChatHelper streamingHelper,
                          ConversationWindowManager conversationWindowManager,
@@ -470,6 +483,12 @@ public class ReasoningNode implements NodeAction {
      * otherwise the documented fallback.
      */
     private int loopContextWindowTokens() {
+        // Per-model effective window (explicit config or probed) beats the
+        // global default — the loop budgeter is otherwise blind to small
+        // local models and never trims for them.
+        if (prefixBudgetPlan != null && prefixBudgetPlan.effectiveMaxTokens() > 0) {
+            return prefixBudgetPlan.effectiveMaxTokens();
+        }
         if (conversationWindowManager != null) {
             int v = conversationWindowManager.getDefaultMaxInputTokens();
             if (v > 0) return v;
@@ -1119,7 +1138,9 @@ public class ReasoningNode implements NodeAction {
         if (!projectRecalled && wikiContextService != null && agentIdStr != null && !agentIdStr.isEmpty()) {
             try {
                 Long parsedAgentId = Long.parseLong(agentIdStr);
-                String wikiRelevant = wikiContextService.buildRelevantContext(parsedAgentId, userMsg);
+                Integer wikiBudgetTokens = (prefixBudgetPlan != null && prefixBudgetPlan.enabled())
+                        ? prefixBudgetPlan.wikiTokens() : null;
+                String wikiRelevant = wikiContextService.buildRelevantContext(parsedAgentId, userMsg, wikiBudgetTokens);
                 if (wikiRelevant != null && !wikiRelevant.isBlank()) {
                     prefix.add(new UserMessage(wikiRelevant));
                 }

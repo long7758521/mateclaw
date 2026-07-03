@@ -38,6 +38,9 @@ import vip.mate.llm.chatmodel.ReasoningEffortResolver;
 import vip.mate.llm.model.ModelConfigEntity;
 import vip.mate.llm.model.ModelFamily;
 import vip.mate.llm.model.ModelProtocol;
+import vip.mate.agent.context.PrefixBudgetPlan;
+import vip.mate.agent.context.PrefixBudgetPlanner;
+import vip.mate.agent.context.TokenEstimator;
 import vip.mate.llm.model.ModelProviderEntity;
 import vip.mate.llm.probe.ModelContextWindowResolver;
 import vip.mate.llm.routing.ProviderModelRef;
@@ -99,6 +102,7 @@ public class AgentGraphBuilder {
     private final ModelConfigService modelConfigService;
     private final ModelProviderService modelProviderService;
     private final ModelContextWindowResolver contextWindowResolver;
+    private final PrefixBudgetPlanner prefixBudgetPlanner;
     private final vip.mate.llm.service.ModelCapabilityService modelCapabilityService;
     private final ProviderRouter providerRouter;
     private final PlanningService planningService;
@@ -396,7 +400,22 @@ public class AgentGraphBuilder {
             }
         }
 
-        String enhancedPrompt = buildEnhancedPrompt(entity, builtinSearchEnabled);
+        // Prefix injection budget: optional blocks (memory / wiki / skill
+        // catalog / extension catalog / ledger) share a token budget scaled
+        // to the model's effective window. The agent's own prompt and the
+        // tool schemas are never truncated — they are subtracted from the
+        // budget so the optional blocks absorb the squeeze.
+        int basePromptTokens = TokenEstimator.estimateTokens(entity.getSystemPrompt());
+        int toolSchemaTokens = TokenEstimator.estimateToolsTokens(toolSet.callbacks());
+        PrefixBudgetPlan prefixBudgetPlan = prefixBudgetPlanner.plan(
+                effectiveMaxInputTokens, basePromptTokens, toolSchemaTokens);
+        if (basePromptTokens > prefixBudgetPlan.effectiveMaxTokens() / 2) {
+            log.warn("Agent {} 的身份 prompt 约 {} tokens,已超过模型有效窗口 {} 的一半——"
+                            + "系统不会截断用户自写的身份 prompt,请自行精简,否则小上下文模型可能无法响应",
+                    entity.getId(), basePromptTokens, prefixBudgetPlan.effectiveMaxTokens());
+        }
+
+        String enhancedPrompt = buildEnhancedPrompt(entity, builtinSearchEnabled, prefixBudgetPlan.memoryTokens());
 
         // Runtime skill-catalog renderer — captures this agent's bound skills,
         // effective tool allowlist, model window and workspace; invoked each
@@ -432,7 +451,8 @@ public class AgentGraphBuilder {
             log.info("Built StateGraph Plan-Execute agent: {} (maxIterations={}, tools={}, protocol={})",
                     entity.getName(), maxIter, toolSet.size(), protocol.getId());
         } else {
-            agent = buildReActAgent(toolSet, runtimeModel, maxIter, entity.getId(), skillCatalogRenderer);
+            agent = buildReActAgent(toolSet, runtimeModel, maxIter, entity.getId(), skillCatalogRenderer,
+                    prefixBudgetPlan);
             // StateGraph 路径下工具调用由 ActionNode 控制，始终启用
             toolCallingEnabled = true;
             log.info("Built StateGraph ReAct agent: {} (maxIterations={}, tools={}, protocol={})",
@@ -519,11 +539,17 @@ public class AgentGraphBuilder {
 
     StateGraphReActAgent buildReActAgent(AgentToolSet toolSet, ModelConfigEntity runtimeModel,
                                          int maxIter, Long agentId, SkillCatalogRenderer skillCatalogRenderer) {
+        return buildReActAgent(toolSet, runtimeModel, maxIter, agentId, skillCatalogRenderer, null);
+    }
+
+    StateGraphReActAgent buildReActAgent(AgentToolSet toolSet, ModelConfigEntity runtimeModel,
+                                         int maxIter, Long agentId, SkillCatalogRenderer skillCatalogRenderer,
+                                         PrefixBudgetPlan prefixBudgetPlan) {
         ChatModel chatModel = buildRuntimeChatModel(runtimeModel);
         ChatClient chatClient = ChatClient.create(chatModel);
         String reasoningEffort = resolveReasoningEffortForModel(runtimeModel);
         CompiledGraph compiledGraph = buildReActGraph(toolSet, chatModel, maxIter, reasoningEffort,
-                runtimeModel, agentId, skillCatalogRenderer);
+                runtimeModel, agentId, skillCatalogRenderer, prefixBudgetPlan);
         return new StateGraphReActAgent(chatClient, conversationService, compiledGraph,
                 chatModel, conversationWindowManager, toolSet);
     }
@@ -849,6 +875,14 @@ public class AgentGraphBuilder {
     CompiledGraph buildReActGraph(AgentToolSet toolSet, ChatModel chatModel, int maxIterations,
                                    String reasoningEffort, ModelConfigEntity primaryModelConfig,
                                    Long agentId, SkillCatalogRenderer skillCatalogRenderer) {
+        return buildReActGraph(toolSet, chatModel, maxIterations, reasoningEffort,
+                primaryModelConfig, agentId, skillCatalogRenderer, null);
+    }
+
+    CompiledGraph buildReActGraph(AgentToolSet toolSet, ChatModel chatModel, int maxIterations,
+                                   String reasoningEffort, ModelConfigEntity primaryModelConfig,
+                                   Long agentId, SkillCatalogRenderer skillCatalogRenderer,
+                                   PrefixBudgetPlan prefixBudgetPlan) {
         try {
             List<vip.mate.llm.failover.FallbackEntry> fallbackChain = buildFallbackChain(primaryModelConfig, agentId);
             NodeStreamingChatHelper streamingHelper = new NodeStreamingChatHelper(
@@ -885,6 +919,7 @@ public class AgentGraphBuilder {
                     supportsReasoningEffort,
                     streamingHelper, conversationWindowManager, streamTracker, 0, wikiContextService,
                     skillCatalogRenderer, toolDisclosureService, progressLedgerService);
+            reasoningNode.setPrefixBudgetPlan(prefixBudgetPlan);
             ActionNode actionNode = new ActionNode(executor, streamTracker);
             ObservationProcessor observationProcessor = new ObservationProcessor(graphObservationProperties);
             ObservationNode observationNode = new ObservationNode(observationProcessor, streamTracker);
@@ -1473,6 +1508,10 @@ public class AgentGraphBuilder {
             """;
 
     private String buildEnhancedPrompt(AgentEntity entity, boolean builtinSearchEnabled) {
+        return buildEnhancedPrompt(entity, builtinSearchEnabled, Integer.MAX_VALUE);
+    }
+
+    private String buildEnhancedPrompt(AgentEntity entity, boolean builtinSearchEnabled, int memoryBudgetTokens) {
         // The agent's own systemPrompt encodes its identity (role / goal /
         // backstory). The memory block from workspace files (AGENTS.md, SOUL.md,
         // PROFILE.md, MEMORY.md, ...) augments that identity with durable
@@ -1481,7 +1520,7 @@ public class AgentGraphBuilder {
         // dropped the identity prompt, so editor-side identity changes never
         // reached runtime if the agent had any workspace files.
         String identityPrompt = entity.getSystemPrompt() != null ? entity.getSystemPrompt().trim() : "";
-        String memoryPrompt = memoryManager.buildSystemPromptBlock(entity.getId());
+        String memoryPrompt = memoryManager.buildSystemPromptBlock(entity.getId(), memoryBudgetTokens);
         StringBuilder basePromptBuilder = new StringBuilder();
         if (!identityPrompt.isEmpty()) {
             basePromptBuilder.append(identityPrompt);
